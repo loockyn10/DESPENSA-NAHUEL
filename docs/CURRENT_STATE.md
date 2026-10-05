@@ -3,8 +3,13 @@
 ## Implementado en repo
 
 - Bootstrap de Tauri 2, React, Vite y TypeScript.
-- Pantalla mínima “Despensa Nahuel — Sistema en preparación”.
-- Configuración de TypeScript, ESLint, Vite y Tauri/Rust.
+- SQLite local reproducible mediante migration versionada.
+- Catálogo de productos `UNIT`/`WEIGHT`, categorías y activación/desactivación.
+- Stock por movimientos: inicial, compra, venta y ajuste manual.
+- Compras confirmadas con aumento de stock y costo promedio ponderado.
+- POS con búsqueda por nombre/barcode, carrito y confirmación de venta.
+- Snapshots de nombre, precio y costo en cada item vendido.
+- Pantallas Vender, Productos, Categorías, Stock y Compras.
 - Documentación canónica y guía de agentes.
 
 ## Verificado
@@ -12,17 +17,19 @@
 - ESLint sin errores.
 - `tsc -b` sin errores.
 - Build de producción Vite generado correctamente.
-- `cargo check` completó correctamente para el crate Tauri/Rust.
-- Compilación debug de Tauri/Rust generó `src-tauri/target/debug/despensa-nahuel.exe`.
+- Tests Rust: promedio, compra, venta/snapshot, atomicidad, barcode y persistencia end-to-end.
+- La aplicación de desarrollo compiló, abrió y creó la base en App Data.
+- Build release y paquetes Windows MSI/NSIS generados correctamente.
 
 ## Pendiente
 
-- Discovery con Lili y todos los módulos de negocio.
-- Decidir y construir persistencia SQLite en un sprint posterior.
+- Discovery con Lili.
+- Caja, gastos, resultados, reposición, inventario físico y periféricos.
+- Flujos de anulación/reversión para operaciones confirmadas.
 
 ## Requiere verificación
 
-- Ejecución interactiva completa con `pnpm tauri:dev` y empaquetado instalable Windows con `pnpm tauri:build`.
+- Recorrido visual manual completo del escenario operativo; la autorización de control de Windows venció durante esta ejecución.
 
 ## Estado remoto
 

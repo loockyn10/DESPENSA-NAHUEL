@@ -35,3 +35,27 @@
 **Decisión:** distinguir flujo de dinero de resultado económico.  
 **Motivo:** una compra de mercadería reduce caja pero genera stock.  
 **Consecuencias:** reportes y modelo contable futuros deben evitar equiparar compra con pérdida.
+
+## D007 — Dinero y cantidades enteras
+
+**Decisión:** guardar dinero en centavos y cantidades en milésimas enteras. `UNIT` exige múltiplos de 1000; `WEIGHT` admite hasta 0,001 kg.
+**Motivo:** SQLite opera estas magnitudes sin errores acumulativos de punto flotante.
+**Consecuencias:** toda entrada/salida convierte en los bordes de UI; ampliar precisión requerirá una migration explícita.
+
+## D008 — Stock por ledger sin cache inicial
+
+**Decisión:** calcular stock como suma de `inventory_movements`; no guardar `products.stock`.
+**Motivo:** el volumen MVP prioriza una única fuente auditable y correcta.
+**Consecuencias:** se agregaron índices por producto/fecha; un cache sólo se evaluará con evidencia de rendimiento.
+
+## D009 — Confirmaciones atómicas e historia inmutable
+
+**Decisión:** compras y ventas se preparan en memoria y se persisten directamente como `CONFIRMED` en una transacción `IMMEDIATE`. No se permite vender ni ajustar por debajo de cero.
+**Motivo:** evitar borradores abandonados y estados parciales en el MVP de una sola PC.
+**Consecuencias:** operaciones confirmadas no se editan; anulaciones/reversiones quedan para un flujo posterior.
+
+## D010 — Costo promedio con costo desconocido
+
+**Decisión:** si el stock previo es cero/negativo o el costo actual es cero, la primera compra conocida fija su costo unitario; en los demás casos se aplica promedio ponderado redondeado al centavo más cercano.
+**Motivo:** stock inicial sin costo no debe diluir artificialmente la primera valuación conocida.
+**Consecuencias:** el costo se actualiza junto con compra y movimiento en una única transacción.
