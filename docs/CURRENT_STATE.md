@@ -10,6 +10,13 @@
 - POS con búsqueda por nombre/barcode, carrito y confirmación de venta.
 - Snapshots de nombre, precio y costo en cada item vendido.
 - Pantallas Vender, Productos, Categorías, Stock y Compras.
+- Medios de pago en ventas, compras y gastos, con históricos previos “Sin clasificar”.
+- Ledger financiero auditable y confirmaciones atómicas con dinero, inventario y operación origen.
+- Gastos y categorías de gasto extensibles.
+- Caja diaria con apertura, efectivo esperado, ajustes justificados, cierre contado y diferencia.
+- Dashboard inicial por rango con resultado estimado, flujo, compras, inventario y alertas.
+- Inventario físico parcial con snapshots y ajustes de ledger.
+- Stock mínimo/objetivo y lista de reposición para `UNIT` y `WEIGHT`.
 - Documentación canónica y guía de agentes.
 
 ## Verificado
@@ -17,14 +24,14 @@
 - ESLint sin errores.
 - `tsc -b` sin errores.
 - Build de producción Vite generado correctamente.
-- Tests Rust: promedio, compra, venta/snapshot, atomicidad, barcode y persistencia end-to-end.
+- Tests Rust: promedio, compra, venta/snapshot, atomicidad, barcode, resultado económico, caja, inventario físico, reposición, migración y persistencia end-to-end.
 - La aplicación de desarrollo compiló, abrió y creó la base en App Data.
 - Build release y paquetes Windows MSI/NSIS generados correctamente.
 
 ## Pendiente
 
 - Discovery con Lili.
-- Caja, gastos, resultados, reposición, inventario físico y periféricos.
+- Periféricos y anulaciones/reversiones auditables.
 - Flujos de anulación/reversión para operaciones confirmadas.
 
 ## Requiere verificación

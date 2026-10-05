@@ -59,3 +59,27 @@
 **Decisión:** si el stock previo es cero/negativo o el costo actual es cero, la primera compra conocida fija su costo unitario; en los demás casos se aplica promedio ponderado redondeado al centavo más cercano.
 **Motivo:** stock inicial sin costo no debe diluir artificialmente la primera valuación conocida.
 **Consecuencias:** el costo se actualiza junto con compra y movimiento en una única transacción.
+
+## D011 — Ledger financiero separado del resultado
+
+**Decisión:** toda venta, compra, gasto o ajuste manual genera un movimiento financiero auditable; el resultado se calcula como ventas menos costo snapshot vendido menos gastos operativos.
+**Motivo:** flujo de dinero ≠ resultado económico; comprar mercadería reduce dinero y aumenta inventario, no es una pérdida automática.
+**Consecuencias:** compras se muestran separadas y nunca se restan nuevamente del resultado estimado.
+
+## D012 — Compatibilidad honesta de medios de pago
+
+**Decisión:** operaciones previas a Sprint 2 se migran al ledger con medio de pago nulo.
+**Motivo:** no existe evidencia para clasificarlas como efectivo.
+**Consecuencias:** reportes las cuentan en flujo total y advierten “Sin clasificar”; no alteran la caja física.
+
+## D013 — Caja diaria simple y derivada
+
+**Decisión:** una caja local por fecha con saldo inicial, movimientos en efectivo, cierre contado y diferencia.
+**Motivo:** responder “cuánto debería haber” sin modelar turnos o empleados.
+**Consecuencias:** los ajustes son movimientos append-only con motivo obligatorio; no se edita un saldo final.
+
+## D014 — Conteo físico como evidencia y ajuste
+
+**Decisión:** cada control parcial conserva stock esperado, contado, diferencia, costo snapshot y enlaza el `ADJUSTMENT` generado.
+**Motivo:** el ledger sigue siendo la fuente de stock y la diferencia debe poder explicarse.
+**Consecuencias:** su valor se muestra separado de gastos operativos.

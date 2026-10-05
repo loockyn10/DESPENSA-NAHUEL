@@ -9,7 +9,8 @@
 - POS base. ✅
 - Stock y movimientos. ✅
 - Compras y costos. ✅
-- Reposición.
-- Gastos y resultados.
+- Reposición. ✅
+- Gastos, caja y resultados. ✅
+- Inventario físico parcial. ✅
 
 Las prioridades posteriores se definirán con la información de discovery y el uso real.

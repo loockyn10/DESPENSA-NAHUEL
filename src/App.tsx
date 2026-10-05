@@ -1,416 +1,151 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, KeyboardEvent } from "react";
+import type { FormEvent, KeyboardEvent, ReactNode } from "react";
 import { api } from "./api";
 import { errorMessage, money, parseMoney, parseQuantity, quantity, today } from "./format";
 import type {
-  Category,
-  InventoryMovement,
-  OperationSummary,
-  Product,
-  ProductInput,
-  SaleDetail,
-  UnitType,
+  CashSummary, Category, DashboardSummary, Expense, ExpenseCategory, FinancialMovement,
+  InventoryCountSummary, InventoryMovement, OperationSummary, PaymentMethod, Product,
+  ProductInput, ReplenishmentItem, SaleDetail, UnitType,
 } from "./types";
 
-type View = "sell" | "products" | "categories" | "stock" | "purchases";
+type View = "home" | "sell" | "products" | "categories" | "stock" | "purchases" | "expenses" | "cash" | "replenishment";
 type Notice = { kind: "success" | "error"; text: string } | null;
 type CartLine = { product: Product; quantityMillis: number };
 type PurchaseLine = CartLine & { unitCostCents: number };
+type Complete = (task: () => Promise<unknown>, message: string) => Promise<boolean>;
 
 const navItems: { id: View; label: string; icon: string }[] = [
-  { id: "sell", label: "Vender", icon: "▣" },
-  { id: "products", label: "Productos", icon: "◇" },
+  { id: "home", label: "Inicio", icon: "⌂" }, { id: "sell", label: "Vender", icon: "▣" },
+  { id: "products", label: "Productos", icon: "◇" }, { id: "stock", label: "Stock", icon: "≋" },
+  { id: "purchases", label: "Compras", icon: "↓" }, { id: "expenses", label: "Gastos", icon: "−" },
+  { id: "cash", label: "Caja", icon: "$" }, { id: "replenishment", label: "Reposición", icon: "↻" },
   { id: "categories", label: "Categorías", icon: "⌗" },
-  { id: "stock", label: "Stock", icon: "≋" },
-  { id: "purchases", label: "Compras", icon: "↓" },
 ];
-
-const emptyProduct: ProductInput = {
-  name: "",
-  barcode: null,
-  categoryId: null,
-  unitType: "UNIT",
-  salePriceCents: 0,
+const paymentOptions: { value: PaymentMethod; label: string }[] = [
+  { value: "CASH", label: "Efectivo" }, { value: "TRANSFER", label: "Transferencia" },
+  { value: "CARD", label: "Tarjeta" }, { value: "OTHER", label: "Otro" },
+];
+const paymentLabel = (method: PaymentMethod | null) => paymentOptions.find((option) => option.value === method)?.label ?? "Sin clasificar";
+const emptyProduct: ProductInput = { name: "", barcode: null, categoryId: null, unitType: "UNIT", salePriceCents: 0, reorderMinMillis: null, reorderTargetMillis: null };
+const amountFor = (millis: number, cents: number) => Math.round((millis * cents) / 1000);
+const monthRange = () => {
+  const date = new Date();
+  const start = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-01`;
+  const next = new Date(date.getFullYear(), date.getMonth() + 1, 1);
+  const end = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}-01`;
+  return { start, end };
 };
 
-function amountFor(quantityMillis: number, cents: number) {
-  return Math.round((quantityMillis * cents) / 1000);
+function PaymentSelect({ value, onChange }: { value: PaymentMethod; onChange: (value: PaymentMethod) => void }) {
+  return <select value={value} onChange={(event) => onChange(event.target.value as PaymentMethod)}>{paymentOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>;
 }
 
-function QuantityInput({
-  product,
-  value,
-  onChange,
-}: {
-  product: Product;
-  value: number;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <input
-      className="quantity-input"
-      inputMode="decimal"
-      aria-label={`Cantidad de ${product.name}`}
-      defaultValue={product.unitType === "WEIGHT" ? (value / 1000).toFixed(3).replace(".", ",") : value / 1000}
-      onChange={(event) => {
-        const parsed = parseQuantity(event.target.value, product.unitType);
-        if (parsed !== null) onChange(parsed);
-      }}
-    />
-  );
+function QuantityInput({ product, value, onChange }: { product: Product; value: number; onChange: (value: number) => void }) {
+  return <input className="quantity-input" inputMode="decimal" aria-label={`Cantidad de ${product.name}`}
+    defaultValue={product.unitType === "WEIGHT" ? (value / 1000).toFixed(3).replace(".", ",") : value / 1000}
+    onChange={(event) => { const parsed = parseQuantity(event.target.value, product.unitType); if (parsed !== null) onChange(parsed); }} />;
 }
 
 function App() {
-  const [view, setView] = useState<View>("sell");
-  const [products, setProducts] = useState<Product[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [purchases, setPurchases] = useState<OperationSummary[]>([]);
-  const [sales, setSales] = useState<OperationSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [notice, setNotice] = useState<Notice>(null);
-
+  const [view, setView] = useState<View>("home");
+  const [products, setProducts] = useState<Product[]>([]); const [categories, setCategories] = useState<Category[]>([]);
+  const [purchases, setPurchases] = useState<OperationSummary[]>([]); const [sales, setSales] = useState<OperationSummary[]>([]);
+  const [expenses, setExpenses] = useState<Expense[]>([]); const [expenseCategories, setExpenseCategories] = useState<ExpenseCategory[]>([]);
+  const [financial, setFinancial] = useState<FinancialMovement[]>([]); const [counts, setCounts] = useState<InventoryCountSummary[]>([]);
+  const [replenishment, setReplenishment] = useState<ReplenishmentItem[]>([]); const [loading, setLoading] = useState(true); const [notice, setNotice] = useState<Notice>(null);
   const refresh = useCallback(async () => {
-    const [nextProducts, nextCategories, nextPurchases, nextSales] = await Promise.all([
-      api.listProducts(),
-      api.listCategories(),
-      api.listPurchases(),
-      api.listSales(),
-    ]);
-    setProducts(nextProducts);
-    setCategories(nextCategories);
-    setPurchases(nextPurchases);
-    setSales(nextSales);
+    const values = await Promise.all([api.listProducts(), api.listCategories(), api.listPurchases(), api.listSales(), api.listExpenses(), api.listExpenseCategories(), api.listFinancialMovements(), api.listInventoryCounts(), api.listReplenishment()]);
+    setProducts(values[0]); setCategories(values[1]); setPurchases(values[2]); setSales(values[3]); setExpenses(values[4]); setExpenseCategories(values[5]); setFinancial(values[6]); setCounts(values[7]); setReplenishment(values[8]);
   }, []);
-
   useEffect(() => {
-    // La carga inicial sincroniza la UI con la base local de Tauri.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    refresh()
-      .catch((error) => setNotice({ kind: "error", text: errorMessage(error) }))
-      .finally(() => setLoading(false));
+    refresh().catch((error) => setNotice({ kind: "error", text: errorMessage(error) })).finally(() => setLoading(false));
   }, [refresh]);
-
-  const complete = async (task: () => Promise<unknown>, message: string) => {
-    try {
-      await task();
-      await refresh();
-      setNotice({ kind: "success", text: message });
-      return true;
-    } catch (error) {
-      setNotice({ kind: "error", text: errorMessage(error) });
-      return false;
-    }
+  const complete: Complete = async (task, message) => {
+    try { await task(); await refresh(); setNotice({ kind: "success", text: message }); return true; }
+    catch (error) { setNotice({ kind: "error", text: errorMessage(error) }); return false; }
   };
-
-  return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-mark">DN</span>
-          <div><strong>Despensa</strong><small>Nahuel</small></div>
-        </div>
-        <nav aria-label="Navegación principal">
-          {navItems.map((item) => (
-            <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => setView(item.id)}>
-              <span aria-hidden="true">{item.icon}</span>{item.label}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-note"><span className="status-dot" /> Datos guardados en esta PC</div>
-      </aside>
-
-      <main className="workspace">
-        {notice && (
-          <div className={`notice ${notice.kind}`} role="status">
-            {notice.text}<button aria-label="Cerrar mensaje" onClick={() => setNotice(null)}>×</button>
-          </div>
-        )}
-        {loading ? <div className="loading">Abriendo la despensa…</div> : (
-          <>
-            {view === "sell" && <PosView products={products} sales={sales} complete={complete} />}
-            {view === "products" && <ProductsView products={products} categories={categories} complete={complete} />}
-            {view === "categories" && <CategoriesView categories={categories} complete={complete} />}
-            {view === "stock" && <StockView products={products} complete={complete} />}
-            {view === "purchases" && <PurchasesView products={products} purchases={purchases} complete={complete} />}
-          </>
-        )}
-      </main>
-    </div>
-  );
+  return <div className="app-shell"><aside className="sidebar"><div className="brand"><span className="brand-mark">DN</span><div><strong>Despensa</strong><small>Nahuel</small></div></div><nav aria-label="Navegación principal">{navItems.map((item) => <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => setView(item.id)}><span>{item.icon}</span>{item.label}</button>)}</nav><div className="sidebar-note"><span className="status-dot" /> Datos guardados en esta PC</div></aside>
+    <main className="workspace">{notice && <div className={`notice ${notice.kind}`} role="status">{notice.text}<button aria-label="Cerrar mensaje" onClick={() => setNotice(null)}>×</button></div>}{loading ? <div className="loading">Abriendo la despensa…</div> : <>
+      {view === "home" && <HomeView onNavigate={setView} />}{view === "sell" && <PosView products={products} sales={sales} complete={complete} />}{view === "products" && <ProductsView products={products} categories={categories} complete={complete} />}{view === "categories" && <CategoriesView categories={categories} complete={complete} />}{view === "stock" && <StockView products={products} counts={counts} complete={complete} />}{view === "purchases" && <PurchasesView products={products} purchases={purchases} complete={complete} />}{view === "expenses" && <ExpensesView expenses={expenses} categories={expenseCategories} complete={complete} />}{view === "cash" && <CashView financial={financial} complete={complete} />}{view === "replenishment" && <ReplenishmentView items={replenishment} />}
+    </>}</main></div>;
 }
 
-function PageHeader({ eyebrow, title, detail }: { eyebrow: string; title: string; detail: string }) {
-  return <header className="page-header"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{detail}</p></div></header>;
+function PageHeader({ eyebrow, title, detail, action }: { eyebrow: string; title: string; detail: string; action?: ReactNode }) {
+  return <header className="page-header"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{detail}</p></div>{action}</header>;
 }
 
-function CategoriesView({
-  categories,
-  complete,
-}: {
-  categories: Category[];
-  complete: (task: () => Promise<unknown>, message: string) => Promise<boolean>;
-}) {
-  const [name, setName] = useState("");
-  const [editing, setEditing] = useState<Category | null>(null);
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    const success = await complete(
-      () => editing ? api.updateCategory(editing.id, name) : api.createCategory(name),
-      editing ? "Categoría actualizada." : "Categoría creada.",
-    );
-    if (success) { setName(""); setEditing(null); }
-  };
-
-  return <div className="page narrow-page">
-    <PageHeader eyebrow="Organización" title="Categorías" detail="Una lista simple para encontrar los productos más rápido." />
-    <div className="two-column">
-      <form className="panel form-panel" onSubmit={submit}>
-        <h2>{editing ? "Editar categoría" : "Nueva categoría"}</h2>
-        <label>Nombre<input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="Ej. Bebidas" /></label>
-        <div className="actions"><button className="primary" disabled={!name.trim()}>{editing ? "Guardar cambios" : "Crear categoría"}</button>
-          {editing && <button type="button" className="ghost" onClick={() => { setEditing(null); setName(""); }}>Cancelar</button>}
-        </div>
-      </form>
-      <section className="panel"><div className="panel-heading"><h2>Categorías</h2><span className="badge">{categories.length}</span></div>
-        {categories.length === 0 ? <Empty text="Todavía no hay categorías." /> : <div className="simple-list">{categories.map((category) =>
-          <button key={category.id} onClick={() => { setEditing(category); setName(category.name); }}><span>{category.name}</span><small>Editar →</small></button>)}</div>}
-      </section>
-    </div>
-  </div>;
+function HomeView({ onNavigate }: { onNavigate: (view: View) => void }) {
+  const initial = monthRange(); const [start, setStart] = useState(initial.start); const [end, setEnd] = useState(initial.end); const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  useEffect(() => { api.dashboardSummary(start, end).then(setSummary).catch(() => setSummary(null)); }, [start, end]);
+  if (!summary) return <div className="loading">Calculando el resumen…</div>;
+  const margin = summary.salesCents > 0 ? (summary.grossProfitCents / summary.salesCents) * 100 : 0;
+  return <div className="page"><PageHeader eyebrow="Control del negocio" title="Inicio" detail="Los números del negocio, separados de los movimientos de plata." action={<div className="date-range"><label>Desde<input type="date" value={start} onChange={(e) => setStart(e.target.value)} /></label><label>Hasta (sin incluir)<input type="date" value={end} onChange={(e) => setEnd(e.target.value)} /></label></div>} />
+    <div className="alert-grid"><button onClick={() => onNavigate("replenishment")}><strong>{summary.replenishmentCount}</strong><span>productos necesitan reposición</span></button><button onClick={() => onNavigate("stock")}><strong>{money(summary.positiveInventoryDifferenceCents - summary.negativeInventoryDifferenceCents)}</strong><span>balance de diferencias físicas</span></button><div><strong>{money(summary.estimatedResultCents)}</strong><span>resultado estimado del período</span></div></div>
+    <div className="dashboard-grid"><section className="panel result-card"><div className="panel-heading"><div><p className="eyebrow">Rentabilidad</p><h2>Cómo se forma el resultado</h2></div><span className="badge">Estimación</span></div><Metric label="Ventas" value={summary.salesCents} /><Metric label="Costo de productos vendidos" value={-summary.costOfGoodsCents} /><Metric label={`Ganancia bruta · margen ${margin.toFixed(1).replace(".", ",")}%`} value={summary.grossProfitCents} strong /><Metric label="Gastos operativos" value={-summary.expensesCents} /><Metric label="Resultado estimado" value={summary.estimatedResultCents} highlight /><p className="explanation">Las compras no se restan otra vez: pasan a formar parte del inventario y su costo se reconoce cuando vendés.</p></section>
+      <section className="panel"><div className="panel-heading"><div><p className="eyebrow">Flujo de dinero</p><h2>Plata que entró y salió</h2></div></div><Metric label="Ingresos" value={summary.cashInCents} /><Metric label="Egresos" value={-summary.cashOutCents} /><Metric label="Flujo neto" value={summary.cashInCents - summary.cashOutCents} strong />{summary.unknownPaymentCount > 0 && <p className="warning-note">{summary.unknownPaymentCount} movimientos históricos tienen medio de pago sin clasificar.</p>}</section></div>
+    <div className="metric-cards"><article><span>Compraste mercadería por</span><strong>{money(summary.purchasesCents)}</strong><small>Se muestra aparte del resultado.</small></article><article><span>Inventario valorizado</span><strong>{money(summary.inventoryValueCents)}</strong><small>Stock actual × costo actual.</small></article><article><span>Diferencias negativas</span><strong>{money(-summary.negativeInventoryDifferenceCents)}</strong><small>Indicador separado de gastos.</small></article><article><span>Diferencias positivas</span><strong>{money(summary.positiveInventoryDifferenceCents)}</strong><small>Valor aproximado al conteo.</small></article></div></div>;
 }
 
-function ProductsView({
-  products,
-  categories,
-  complete,
-}: {
-  products: Product[];
-  categories: Category[];
-  complete: (task: () => Promise<unknown>, message: string) => Promise<boolean>;
-}) {
-  const [search, setSearch] = useState("");
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [form, setForm] = useState<ProductInput>(emptyProduct);
-  const [price, setPrice] = useState("");
-  const [showForm, setShowForm] = useState(false);
+function Metric({ label, value, strong, highlight }: { label: string; value: number; strong?: boolean; highlight?: boolean }) { return <div className={`metric-row ${strong ? "strong" : ""} ${highlight ? "highlight" : ""}`}><span>{label}</span><b>{value < 0 ? `−${money(-value)}` : money(value)}</b></div>; }
+
+function CategoriesView({ categories, complete }: { categories: Category[]; complete: Complete }) {
+  const [name, setName] = useState(""); const [editing, setEditing] = useState<Category | null>(null);
+  const submit = async (event: FormEvent) => { event.preventDefault(); const ok = await complete(() => editing ? api.updateCategory(editing.id, name) : api.createCategory(name), editing ? "Categoría actualizada." : "Categoría creada."); if (ok) { setName(""); setEditing(null); } };
+  return <div className="page narrow-page"><PageHeader eyebrow="Organización" title="Categorías" detail="Una lista simple para encontrar los productos más rápido." /><div className="two-column"><form className="panel form-panel" onSubmit={submit}><h2>{editing ? "Editar categoría" : "Nueva categoría"}</h2><label>Nombre<input autoFocus value={name} onChange={(e) => setName(e.target.value)} /></label><button className="primary" disabled={!name.trim()}>Guardar</button></form><section className="panel"><div className="panel-heading"><h2>Categorías</h2><span className="badge">{categories.length}</span></div><div className="simple-list">{categories.map((category) => <button key={category.id} onClick={() => { setEditing(category); setName(category.name); }}><span>{category.name}</span><small>Editar →</small></button>)}</div></section></div></div>;
+}
+
+function ProductsView({ products, categories, complete }: { products: Product[]; categories: Category[]; complete: Complete }) {
+  const [search, setSearch] = useState(""); const [editingId, setEditingId] = useState<number | null>(null); const [form, setForm] = useState<ProductInput>(emptyProduct); const [price, setPrice] = useState(""); const [minimum, setMinimum] = useState(""); const [target, setTarget] = useState(""); const [showForm, setShowForm] = useState(false);
   const filtered = products.filter((product) => `${product.name} ${product.barcode ?? ""}`.toLowerCase().includes(search.toLowerCase()));
-
-  const startCreate = () => { setEditingId(null); setForm(emptyProduct); setPrice(""); setShowForm(true); };
-  const startEdit = (product: Product) => {
-    setEditingId(product.id);
-    setForm({ name: product.name, barcode: product.barcode, categoryId: product.categoryId, unitType: product.unitType, salePriceCents: product.salePriceCents });
-    setPrice((product.salePriceCents / 100).toFixed(2).replace(".", ","));
-    setShowForm(true);
-  };
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    const cents = parseMoney(price);
-    if (cents === null) return;
-    const input = { ...form, barcode: form.barcode || null, salePriceCents: cents };
-    const success = await complete(
-      () => editingId ? api.updateProduct(editingId, input) : api.createProduct(input),
-      editingId ? "Producto actualizado." : "Producto creado.",
-    );
-    if (success) setShowForm(false);
-  };
-
-  return <div className="page">
-    <PageHeader eyebrow="Catálogo" title="Productos" detail="Precios, costos y stock actual en una sola vista." />
-    <div className="toolbar"><input className="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar por nombre o código…" /><button className="primary" onClick={startCreate}>+ Nuevo producto</button></div>
-    {showForm && <form className="panel product-form" onSubmit={submit}>
-      <div className="panel-heading"><h2>{editingId ? "Editar producto" : "Nuevo producto"}</h2><button type="button" className="close" onClick={() => setShowForm(false)}>×</button></div>
-      <div className="form-grid">
-        <label>Nombre<input autoFocus value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
-        <label>Código de barras<input value={form.barcode ?? ""} onChange={(e) => setForm({ ...form, barcode: e.target.value })} /></label>
-        <label>Categoría<select value={form.categoryId ?? ""} onChange={(e) => setForm({ ...form, categoryId: e.target.value ? Number(e.target.value) : null })}><option value="">Sin categoría</option>{categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
-        <label>Tipo<select value={form.unitType} onChange={(e) => setForm({ ...form, unitType: e.target.value as UnitType })}><option value="UNIT">Por unidad</option><option value="WEIGHT">Por peso (kg)</option></select></label>
-        <label>Precio de venta<input inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="1600,00" /></label>
-      </div>
-      <div className="actions"><button className="primary" disabled={!form.name.trim() || parseMoney(price) === null}>Guardar producto</button><button type="button" className="ghost" onClick={() => setShowForm(false)}>Cancelar</button></div>
-    </form>}
-    <section className="panel table-panel">
-      {filtered.length === 0 ? <Empty text="No hay productos para mostrar." /> : <div className="table-wrap"><table><thead><tr><th>Producto</th><th>Categoría</th><th>Tipo</th><th>Stock</th><th>Costo</th><th>Precio</th><th>Margen</th><th /></tr></thead><tbody>
-        {filtered.map((product) => {
-          const gain = product.salePriceCents - product.currentCostCents;
-          const margin = product.salePriceCents > 0 ? (gain / product.salePriceCents) * 100 : 0;
-          return <tr key={product.id} className={!product.active ? "muted-row" : ""}>
-            <td><strong>{product.name}</strong><small>{product.barcode || "Sin código"}{!product.active && " · Inactivo"}</small></td><td>{product.categoryName || "—"}</td><td>{product.unitType === "UNIT" ? "Unidad" : "Peso"}</td><td>{quantity(product.stockMillis, product.unitType)}</td><td>{money(product.currentCostCents)}</td><td>{money(product.salePriceCents)}</td><td>{money(gain)}<small>{margin.toFixed(1).replace(".", ",")}%</small></td>
-            <td><div className="row-actions"><button onClick={() => startEdit(product)}>Editar</button><button onClick={() => complete(() => api.setProductActive(product.id, !product.active), product.active ? "Producto desactivado." : "Producto activado.")}>{product.active ? "Desactivar" : "Activar"}</button></div></td>
-          </tr>;
-        })}
-      </tbody></table></div>}
-    </section>
-  </div>;
+  const startCreate = () => { setEditingId(null); setForm(emptyProduct); setPrice(""); setMinimum(""); setTarget(""); setShowForm(true); };
+  const startEdit = (product: Product) => { setEditingId(product.id); setForm({ name: product.name, barcode: product.barcode, categoryId: product.categoryId, unitType: product.unitType, salePriceCents: product.salePriceCents, reorderMinMillis: product.reorderMinMillis, reorderTargetMillis: product.reorderTargetMillis }); setPrice((product.salePriceCents / 100).toFixed(2).replace(".", ",")); setMinimum(product.reorderMinMillis === null ? "" : String(product.reorderMinMillis / 1000).replace(".", ",")); setTarget(product.reorderTargetMillis === null ? "" : String(product.reorderTargetMillis / 1000).replace(".", ",")); setShowForm(true); };
+  const submit = async (event: FormEvent) => { event.preventDefault(); const cents = parseMoney(price); const min = minimum ? parseQuantity(minimum, form.unitType) : null; const goal = target ? parseQuantity(target, form.unitType) : null; if (cents === null || (minimum && min === null) || (target && goal === null)) return; const input = { ...form, barcode: form.barcode || null, salePriceCents: cents, reorderMinMillis: min, reorderTargetMillis: goal }; const ok = await complete(() => editingId ? api.updateProduct(editingId, input) : api.createProduct(input), editingId ? "Producto actualizado." : "Producto creado."); if (ok) setShowForm(false); };
+  return <div className="page"><PageHeader eyebrow="Catálogo" title="Productos" detail="Precios, costos y niveles de reposición en una sola vista." /><div className="toolbar"><input className="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar por nombre o código…" /><button className="primary" onClick={startCreate}>+ Nuevo producto</button></div>{showForm && <form className="panel product-form" onSubmit={submit}><div className="panel-heading"><h2>{editingId ? "Editar producto" : "Nuevo producto"}</h2><button type="button" className="close" onClick={() => setShowForm(false)}>×</button></div><div className="form-grid"><label>Nombre<input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label><label>Código de barras<input value={form.barcode ?? ""} onChange={(e) => setForm({ ...form, barcode: e.target.value })} /></label><label>Categoría<select value={form.categoryId ?? ""} onChange={(e) => setForm({ ...form, categoryId: e.target.value ? Number(e.target.value) : null })}><option value="">Sin categoría</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><label>Tipo<select value={form.unitType} onChange={(e) => setForm({ ...form, unitType: e.target.value as UnitType })}><option value="UNIT">Por unidad</option><option value="WEIGHT">Por peso (kg)</option></select></label><label>Precio de venta<input inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} /></label><label>Stock mínimo<input inputMode="decimal" value={minimum} onChange={(e) => setMinimum(e.target.value)} placeholder="Opcional" /></label><label>Stock objetivo<input inputMode="decimal" value={target} onChange={(e) => setTarget(e.target.value)} placeholder="Opcional" /></label></div><p className="helper">El objetivo debe ser igual o mayor al mínimo.</p><button className="primary">Guardar producto</button></form>}
+    <section className="panel table-panel"><div className="table-wrap"><table><thead><tr><th>Producto</th><th>Stock</th><th>Costo</th><th>Precio</th><th>Reposición</th><th /></tr></thead><tbody>{filtered.map((product) => <tr key={product.id} className={!product.active ? "muted-row" : ""}><td><strong>{product.name}</strong><small>{product.categoryName || "Sin categoría"}</small></td><td>{quantity(product.stockMillis, product.unitType)}</td><td>{money(product.currentCostCents)}</td><td>{money(product.salePriceCents)}</td><td>{product.reorderMinMillis === null ? "Sin configurar" : `mín. ${quantity(product.reorderMinMillis, product.unitType)} · obj. ${quantity(product.reorderTargetMillis ?? 0, product.unitType)}`}</td><td><div className="row-actions"><button onClick={() => startEdit(product)}>Editar</button><button onClick={() => complete(() => api.setProductActive(product.id, !product.active), product.active ? "Producto desactivado." : "Producto activado.")}>{product.active ? "Desactivar" : "Activar"}</button></div></td></tr>)}</tbody></table></div></section></div>;
 }
 
-function StockView({
-  products,
-  complete,
-}: {
-  products: Product[];
-  complete: (task: () => Promise<unknown>, message: string) => Promise<boolean>;
-}) {
-  const [selectedId, setSelectedId] = useState<number | null>(products[0]?.id ?? null);
-  const [mode, setMode] = useState<"initial" | "adjust">("initial");
-  const [value, setValue] = useState("");
-  const [note, setNote] = useState("");
-  const [movements, setMovements] = useState<InventoryMovement[]>([]);
-  const selected = products.find((product) => product.id === selectedId) ?? null;
-
-  useEffect(() => {
-    api.listMovements(selectedId).then(setMovements).catch(() => setMovements([]));
-  }, [selectedId, products]);
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!selected) return;
-    const millis = parseQuantity(value, selected.unitType);
-    if (millis === null && !(mode === "adjust" && value.trim() === "0")) return;
-    const quantityMillis = mode === "adjust" && value.trim() === "0" ? 0 : millis!;
-    const success = await complete(
-      () => mode === "initial"
-        ? api.addInitialStock(selected.id, quantityMillis, today(), note || null)
-        : api.adjustStock(selected.id, quantityMillis, today(), note || null),
-      mode === "initial" ? "Stock inicial registrado." : "Ajuste registrado.",
-    );
-    if (success) { setValue(""); setNote(""); setMovements(await api.listMovements(selected.id)); }
-  };
-
-  return <div className="page">
-    <PageHeader eyebrow="Inventario" title="Stock" detail="Cada cambio queda registrado como un movimiento auditable." />
-    <div className="stock-summary">{products.map((product) => <button key={product.id} className={selectedId === product.id ? "selected" : ""} onClick={() => setSelectedId(product.id)}><span>{product.name}</span><strong>{quantity(product.stockMillis, product.unitType)} {product.unitType === "WEIGHT" ? "kg" : "u."}</strong><small>{money(product.currentCostCents)} c/u · valor {money(amountFor(product.stockMillis, product.currentCostCents))}</small></button>)}</div>
-    {selected && <div className="two-column stock-detail">
-      <form className="panel form-panel" onSubmit={submit}><h2>Actualizar {selected.name}</h2>
-        <div className="segmented"><button type="button" className={mode === "initial" ? "active" : ""} onClick={() => setMode("initial")}>Stock inicial</button><button type="button" className={mode === "adjust" ? "active" : ""} onClick={() => setMode("adjust")}>Ajuste</button></div>
-        <p className="helper">{mode === "initial" ? "Disponible sólo antes del primer movimiento." : "Ingresá la cantidad real contada; guardaremos la diferencia."}</p>
-        <label>{mode === "initial" ? "Cantidad inicial" : "Cantidad real"}<input inputMode="decimal" value={value} onChange={(e) => setValue(e.target.value)} placeholder={selected.unitType === "WEIGHT" ? "0,750" : "10"} /></label>
-        <label>Nota opcional<textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="Motivo o referencia" /></label>
-        <button className="primary">Registrar movimiento</button>
-      </form>
-      <section className="panel"><div className="panel-heading"><h2>Movimientos recientes</h2><span className="badge">{movements.length}</span></div>
-        {movements.length === 0 ? <Empty text="Este producto todavía no tiene movimientos." /> : <div className="movement-list">{movements.map((movement) => <article key={movement.id}><span className={`movement-icon ${movement.quantityMillis > 0 ? "positive" : "negative"}`}>{movement.quantityMillis > 0 ? "+" : "−"}</span><div><strong>{movement.movementType.replace("_", " ")}</strong><small>{movement.occurredAt}{movement.note ? ` · ${movement.note}` : ""}</small></div><b>{movement.quantityMillis > 0 ? "+" : ""}{quantity(movement.quantityMillis, selected.unitType)}</b></article>)}</div>}
-      </section>
-    </div>}
-  </div>;
+function StockView({ products, counts, complete }: { products: Product[]; counts: InventoryCountSummary[]; complete: Complete }) {
+  const [counted, setCounted] = useState<Record<number, string>>({}); const [note, setNote] = useState(""); const [selectedId, setSelectedId] = useState<number | null>(products[0]?.id ?? null); const [movements, setMovements] = useState<InventoryMovement[]>([]);
+  useEffect(() => { api.listMovements(selectedId).then(setMovements).catch(() => setMovements([])); }, [selectedId, products]);
+  const lines = products.flatMap((product) => { const raw = counted[product.id]; if (raw === undefined || raw === "") return []; const parsed = raw.trim() === "0" ? 0 : parseQuantity(raw, product.unitType); return parsed === null ? [] : [{ productId: product.id, countedQuantityMillis: parsed }]; });
+  const submit = async (event: FormEvent) => { event.preventDefault(); const ok = await complete(() => api.confirmInventoryCount({ occurredAt: today(), note: note || null, items: lines }), "Control de inventario confirmado y diferencias ajustadas."); if (ok) { setCounted({}); setNote(""); } };
+  const selected = products.find((product) => product.id === selectedId);
+  return <div className="page"><PageHeader eyebrow="Inventario físico" title="Stock" detail="Contá uno o varios productos; guardamos lo esperado, lo real y el ajuste." /><div className="two-column stock-detail"><form className="panel form-panel" onSubmit={submit}><div className="panel-heading"><h2>Nuevo control de inventario</h2><span className="badge">Parcial permitido</span></div><div className="count-list">{products.filter((p) => p.active).map((product) => <label key={product.id}><span>{product.name}<small>Sistema: {quantity(product.stockMillis, product.unitType)}</small></span><input inputMode="decimal" value={counted[product.id] ?? ""} onChange={(e) => setCounted({ ...counted, [product.id]: e.target.value })} placeholder="Cantidad real" /></label>)}</div><label>Nota opcional<textarea value={note} onChange={(e) => setNote(e.target.value)} /></label><button className="primary" disabled={lines.length === 0}>Confirmar control</button></form><section className="panel"><div className="panel-heading"><h2>Últimos controles</h2><span className="badge">{counts.length}</span></div>{counts.length === 0 ? <Empty text="Todavía no hay controles físicos." /> : counts.slice(0, 8).map((count) => <article className="history-row" key={count.id}><div><strong>Control #{count.id}</strong><small>{count.occurredAt} · {count.itemCount} productos</small></div><div><b className="negative-text">−{money(count.negativeValueCents)}</b><small>+{money(count.positiveValueCents)}</small></div></article>)}</section></div>
+    <section className="panel recent-section"><div className="panel-heading"><h2>Movimientos por producto</h2><select value={selectedId ?? ""} onChange={(e) => setSelectedId(Number(e.target.value))}>{products.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}</select></div>{!selected || movements.length === 0 ? <Empty text="No hay movimientos para mostrar." /> : <div className="movement-list">{movements.map((movement) => <article key={movement.id}><span className={`movement-icon ${movement.quantityMillis > 0 ? "positive" : "negative"}`}>{movement.quantityMillis > 0 ? "+" : "−"}</span><div><strong>{movement.movementType.replace("_", " ")}</strong><small>{movement.occurredAt}{movement.note ? ` · ${movement.note}` : ""}</small></div><b>{movement.quantityMillis > 0 ? "+" : ""}{quantity(movement.quantityMillis, selected.unitType)}</b></article>)}</div>}</section></div>;
 }
 
-function PurchasesView({
-  products,
-  purchases,
-  complete,
-}: {
-  products: Product[];
-  purchases: OperationSummary[];
-  complete: (task: () => Promise<unknown>, message: string) => Promise<boolean>;
-}) {
-  const active = products.filter((product) => product.active);
-  const [selectedId, setSelectedId] = useState<number | null>(active[0]?.id ?? null);
-  const [lines, setLines] = useState<PurchaseLine[]>([]);
-  const total = lines.reduce((sum, line) => sum + amountFor(line.quantityMillis, line.unitCostCents), 0);
-
-  const add = () => {
-    const product = products.find((item) => item.id === selectedId);
-    if (!product || lines.some((line) => line.product.id === product.id)) return;
-    setLines([...lines, { product, quantityMillis: 1000, unitCostCents: product.currentCostCents }]);
-  };
-  const confirm = async () => {
-    const success = await complete(
-      () => api.confirmPurchase(today(), lines.map((line) => ({ productId: line.product.id, quantityMillis: line.quantityMillis, unitCostCents: line.unitCostCents }))),
-      "Compra confirmada: stock y costos actualizados.",
-    );
-    if (success) setLines([]);
-  };
-
-  return <div className="page">
-    <PageHeader eyebrow="Mercadería" title="Compras" detail="Confirmar una compra aumenta stock y recalcula el costo promedio." />
-    <div className="purchase-layout">
-      <section className="panel purchase-editor"><div className="panel-heading"><h2>Nueva compra</h2><span className="badge">{today()}</span></div>
-        <div className="add-line"><select value={selectedId ?? ""} onChange={(e) => setSelectedId(Number(e.target.value))}><option value="">Elegir producto</option>{active.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}</select><button className="secondary" onClick={add}>Agregar</button></div>
-        {lines.length === 0 ? <Empty text="Agregá productos para registrar una compra." /> : <div className="line-list">{lines.map((line) => <article key={line.product.id}><div><strong>{line.product.name}</strong><small>Stock actual: {quantity(line.product.stockMillis, line.product.unitType)}</small></div><label>Cantidad<QuantityInput product={line.product} value={line.quantityMillis} onChange={(value) => setLines(lines.map((item) => item.product.id === line.product.id ? { ...item, quantityMillis: value } : item))} /></label><label>Costo unitario<input inputMode="decimal" defaultValue={(line.unitCostCents / 100).toFixed(2).replace(".", ",")} onChange={(e) => { const cents = parseMoney(e.target.value); if (cents !== null) setLines(lines.map((item) => item.product.id === line.product.id ? { ...item, unitCostCents: cents } : item)); }} /></label><b>{money(amountFor(line.quantityMillis, line.unitCostCents))}</b><button className="remove" onClick={() => setLines(lines.filter((item) => item.product.id !== line.product.id))}>×</button></article>)}</div>}
-        <footer className="total-bar"><div><span>Total</span><strong>{money(total)}</strong></div><button className="primary large" disabled={lines.length === 0} onClick={confirm}>Confirmar compra</button></footer>
-      </section>
-      <section className="panel history"><div className="panel-heading"><h2>Últimas compras</h2></div>{purchases.length === 0 ? <Empty text="No hay compras confirmadas." /> : purchases.map((purchase) => <article key={purchase.id}><div><strong>Compra #{purchase.id}</strong><small>{purchase.occurredAt} · {purchase.itemCount} productos</small></div><b>{money(purchase.totalCents)}</b></article>)}</section>
-    </div>
-  </div>;
+function PurchasesView({ products, purchases, complete }: { products: Product[]; purchases: OperationSummary[]; complete: Complete }) {
+  const active = products.filter((product) => product.active); const [selectedId, setSelectedId] = useState<number | null>(active[0]?.id ?? null); const [lines, setLines] = useState<PurchaseLine[]>([]); const [payment, setPayment] = useState<PaymentMethod>("TRANSFER"); const total = lines.reduce((sum, line) => sum + amountFor(line.quantityMillis, line.unitCostCents), 0);
+  const add = () => { const product = products.find((item) => item.id === selectedId); if (product && !lines.some((line) => line.product.id === product.id)) setLines([...lines, { product, quantityMillis: 1000, unitCostCents: product.currentCostCents }]); };
+  const confirm = async () => { const ok = await complete(() => api.confirmPurchase(today(), payment, lines.map((line) => ({ productId: line.product.id, quantityMillis: line.quantityMillis, unitCostCents: line.unitCostCents }))), "Compra confirmada: stock, costo y flujo actualizados."); if (ok) setLines([]); };
+  return <div className="page"><PageHeader eyebrow="Mercadería" title="Compras" detail="Una compra baja el dinero disponible, pero no es un gasto del resultado." /><div className="purchase-layout"><section className="panel purchase-editor"><div className="panel-heading"><h2>Nueva compra</h2><span className="badge">{today()}</span></div><div className="add-line"><select value={selectedId ?? ""} onChange={(e) => setSelectedId(Number(e.target.value))}>{active.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}</select><button className="secondary" onClick={add}>Agregar</button></div><div className="line-list">{lines.map((line) => <article key={line.product.id}><div><strong>{line.product.name}</strong><small>Stock: {quantity(line.product.stockMillis, line.product.unitType)}</small></div><label>Cantidad<QuantityInput product={line.product} value={line.quantityMillis} onChange={(value) => setLines(lines.map((item) => item.product.id === line.product.id ? { ...item, quantityMillis: value } : item))} /></label><label>Costo unitario<input defaultValue={(line.unitCostCents / 100).toFixed(2).replace(".", ",")} onChange={(e) => { const cents = parseMoney(e.target.value); if (cents !== null) setLines(lines.map((item) => item.product.id === line.product.id ? { ...item, unitCostCents: cents } : item)); }} /></label><b>{money(amountFor(line.quantityMillis, line.unitCostCents))}</b><button className="remove" onClick={() => setLines(lines.filter((item) => item.product.id !== line.product.id))}>×</button></article>)}</div><div className="checkout-options"><label>Medio de pago<PaymentSelect value={payment} onChange={setPayment} /></label></div><footer className="total-bar"><div><span>Total</span><strong>{money(total)}</strong></div><button className="primary large" disabled={!lines.length} onClick={confirm}>Confirmar compra</button></footer></section><section className="panel history"><div className="panel-heading"><h2>Últimas compras</h2></div>{purchases.map((purchase) => <article key={purchase.id}><div><strong>Compra #{purchase.id}</strong><small>{purchase.occurredAt} · {paymentLabel(purchase.paymentMethod)}</small></div><b>{money(purchase.totalCents)}</b></article>)}</section></div></div>;
 }
 
-function PosView({
-  products,
-  sales,
-  complete,
-}: {
-  products: Product[];
-  sales: OperationSummary[];
-  complete: (task: () => Promise<unknown>, message: string) => Promise<boolean>;
-}) {
-  const [query, setQuery] = useState("");
-  const [cart, setCart] = useState<CartLine[]>([]);
-  const [saleDetail, setSaleDetail] = useState<SaleDetail | null>(null);
-  const searchRef = useRef<HTMLInputElement>(null);
-  const available = useMemo(() => products.filter((product) => product.active && `${product.name} ${product.barcode ?? ""}`.toLowerCase().includes(query.toLowerCase())).slice(0, 12), [products, query]);
-  const total = cart.reduce((sum, line) => sum + amountFor(line.quantityMillis, line.product.salePriceCents), 0);
-
-  const add = (product: Product) => {
-    if (!product.active) {
-      void complete(() => Promise.reject(`${product.name} está inactivo.`), "");
-      return;
-    }
-    if (product.stockMillis <= 0) {
-      void complete(() => Promise.reject(`${product.name} no tiene stock disponible.`), "");
-      return;
-    }
-    const existing = cart.find((line) => line.product.id === product.id);
-    const increment = 1000;
-    if (existing) {
-      if (existing.quantityMillis + increment > product.stockMillis) {
-        void complete(() => Promise.reject(`Stock insuficiente para ${product.name}.`), "");
-        return;
-      }
-      setCart(cart.map((line) => line.product.id === product.id ? { ...line, quantityMillis: line.quantityMillis + increment } : line));
-    } else {
-      setCart([...cart, { product, quantityMillis: Math.min(increment, product.stockMillis) }]);
-    }
-    setQuery("");
-    searchRef.current?.focus();
-  };
-  const scan = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key !== "Enter") return;
-    const exact = products.find((product) => product.barcode?.toLowerCase() === query.trim().toLowerCase());
-    if (exact) add(exact);
-    else void complete(() => Promise.reject("No existe un producto con ese código de barras."), "");
-  };
-  const confirm = async () => {
-    const success = await complete(
-      () => api.confirmSale(today(), cart.map((line) => ({ productId: line.product.id, quantityMillis: line.quantityMillis, unitCostCents: null }))),
-      "Venta confirmada y stock descontado.",
-    );
-    if (success) setCart([]);
-  };
-  const openSale = async (id: number) => {
-    try { setSaleDetail(await api.getSale(id)); } catch { setSaleDetail(null); }
-  };
-
-  return <div className="page pos-page">
-    <PageHeader eyebrow="Punto de venta" title="Nueva venta" detail="Buscá por nombre o escaneá un código y presioná Enter." />
-    <div className="pos-layout">
-      <section className="catalog-panel">
-        <input ref={searchRef} autoFocus className="pos-search" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={scan} placeholder="⌕  Buscar producto o escanear código…" />
-        <div className="product-grid">{available.map((product) => <button key={product.id} disabled={product.stockMillis <= 0} onClick={() => add(product)}><span className="product-category">{product.categoryName || "Producto"}</span><strong>{product.name}</strong><small>Stock: {quantity(product.stockMillis, product.unitType)} {product.unitType === "WEIGHT" ? "kg" : "u."}</small><b>{money(product.salePriceCents)}</b>{product.stockMillis <= 0 && <em>Sin stock</em>}</button>)}</div>
-        {available.length === 0 && <Empty text="No encontramos productos activos con esa búsqueda." />}
-        {sales.length > 0 && <div className="recent-sales"><h2>Ventas recientes</h2>{sales.slice(0, 5).map((sale) => <button key={sale.id} onClick={() => openSale(sale.id)}><span>Venta #{sale.id} · {sale.occurredAt}</span><strong>{money(sale.totalCents)}</strong></button>)}</div>}
-      </section>
-      <aside className="cart-panel"><div className="panel-heading"><h2>Venta actual</h2><span className="badge">{cart.length} items</span></div>
-        {cart.length === 0 ? <Empty text="El carrito está vacío." /> : <div className="cart-lines">{cart.map((line) => <article key={line.product.id}><div><strong>{line.product.name}</strong><small>{money(line.product.salePriceCents)} × {quantity(line.quantityMillis, line.product.unitType)}</small></div><QuantityInput product={line.product} value={line.quantityMillis} onChange={(value) => { if (value <= line.product.stockMillis) setCart(cart.map((item) => item.product.id === line.product.id ? { ...item, quantityMillis: value } : item)); }} /><b>{money(amountFor(line.quantityMillis, line.product.salePriceCents))}</b><button className="remove" onClick={() => setCart(cart.filter((item) => item.product.id !== line.product.id))}>×</button></article>)}</div>}
-        <footer className="checkout"><div><span>Total</span><strong>{money(total)}</strong></div><button className="primary checkout-button" disabled={cart.length === 0} onClick={confirm}>Confirmar venta</button><small>Se validará el stock antes de guardar.</small></footer>
-      </aside>
-    </div>
-    {saleDetail && <div className="modal-backdrop" onClick={() => setSaleDetail(null)}><section className="modal" onClick={(e) => e.stopPropagation()}><div className="panel-heading"><div><p className="eyebrow">Historial</p><h2>Venta #{saleDetail.id}</h2></div><button className="close" onClick={() => setSaleDetail(null)}>×</button></div><p>{saleDetail.occurredAt}</p>{saleDetail.items.map((item) => <article className="snapshot" key={item.productId}><div><strong>{item.productName}</strong><small>{quantity(item.quantityMillis, products.find((p) => p.id === item.productId)?.unitType ?? "UNIT")} × {money(item.unitPriceCents)}</small></div><div><b>{money(item.subtotalCents)}</b><small>Costo histórico: {money(item.unitCostCents)}</small></div></article>)}<div className="snapshot-total"><span>Total {money(saleDetail.totalCents)}</span><span>Costo {money(saleDetail.totalCostCents)}</span><strong>Margen bruto {money(saleDetail.totalCents - saleDetail.totalCostCents)}</strong></div></section></div>}
-  </div>;
+function ExpensesView({ expenses, categories, complete }: { expenses: Expense[]; categories: ExpenseCategory[]; complete: Complete }) {
+  const [categoryId, setCategoryId] = useState<number | null>(categories[0]?.id ?? null); const [description, setDescription] = useState(""); const [amount, setAmount] = useState(""); const [payment, setPayment] = useState<PaymentMethod>("CASH"); const [note, setNote] = useState(""); const [newCategory, setNewCategory] = useState("");
+  const submit = async (event: FormEvent) => { event.preventDefault(); const cents = parseMoney(amount); if (cents === null || !categoryId) return; const ok = await complete(() => api.createExpense({ occurredAt: today(), categoryId, description, amountCents: cents, paymentMethod: payment, note: note || null }), "Gasto registrado en resultado y flujo de dinero."); if (ok) { setDescription(""); setAmount(""); setNote(""); } };
+  return <div className="page"><PageHeader eyebrow="Operación" title="Gastos" detail="Gastos operativos que sí reducen el resultado estimado." /><div className="two-column"><form className="panel form-panel" onSubmit={submit}><h2>Nuevo gasto</h2><label>Categoría<select value={categoryId ?? ""} onChange={(e) => setCategoryId(Number(e.target.value))}>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><label>Descripción<input value={description} onChange={(e) => setDescription(e.target.value)} /></label><label>Importe<input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} /></label><label>Medio de pago<PaymentSelect value={payment} onChange={setPayment} /></label><label>Nota opcional<textarea value={note} onChange={(e) => setNote(e.target.value)} /></label><button className="primary">Registrar gasto</button><div className="inline-create"><input value={newCategory} onChange={(e) => setNewCategory(e.target.value)} placeholder="Nueva categoría" /><button type="button" className="secondary" onClick={async () => { if (await complete(() => api.createExpenseCategory(newCategory), "Categoría de gasto creada.")) setNewCategory(""); }}>Crear</button></div></form><section className="panel history"><div className="panel-heading"><h2>Gastos recientes</h2><span className="badge">{expenses.length}</span></div>{expenses.map((expense) => <article key={expense.id}><div><strong>{expense.description}</strong><small>{expense.occurredAt} · {expense.categoryName} · {paymentLabel(expense.paymentMethod)}</small></div><b>−{money(expense.amountCents)}</b></article>)}</section></div></div>;
 }
 
-function Empty({ text }: { text: string }) {
-  return <div className="empty"><span>◎</span><p>{text}</p></div>;
+function CashView({ financial, complete }: { financial: FinancialMovement[]; complete: Complete }) {
+  const day = today(); const [summary, setSummary] = useState<CashSummary | null>(null); const [opening, setOpening] = useState(""); const [adjustAmount, setAdjustAmount] = useState(""); const [direction, setDirection] = useState<"INCOME" | "OUTFLOW">("INCOME"); const [reason, setReason] = useState(""); const [counted, setCounted] = useState(""); const [closeNote, setCloseNote] = useState(""); const load = useCallback(() => api.getCashSummary(day).then(setSummary), [day]);
+  useEffect(() => { load().catch(() => setSummary(null)); }, [load, financial]); const run = async (task: () => Promise<unknown>, message: string) => { const ok = await complete(task, message); if (ok) await load(); return ok; }; const cashToday = financial.filter((movement) => movement.paymentMethod === "CASH" && movement.occurredAt.slice(0, 10) === day);
+  return <div className="page"><PageHeader eyebrow="Efectivo físico" title="Caja" detail="Cuánto efectivo debería haber y cómo se explica cada movimiento." />{summary && <><div className="cash-strip"><Metric label="Saldo inicial" value={summary.openingCashCents} /><Metric label="Entradas en efectivo" value={summary.cashIncomeCents} /><Metric label="Salidas en efectivo" value={-summary.cashOutflowCents} /><Metric label="Debería haber en caja" value={summary.expectedCashCents} highlight /></div>{!summary.status && <form className="panel compact-form" onSubmit={async (e) => { e.preventDefault(); const cents = parseMoney(opening); if (cents !== null) await run(() => api.openCashSession(day, cents), "Caja del día abierta."); }}><h2>Abrir caja de hoy</h2><label>Saldo inicial<input value={opening} onChange={(e) => setOpening(e.target.value)} /></label><button className="primary">Abrir caja</button></form>}{summary.status === "OPEN" && <div className="two-column"><form className="panel form-panel" onSubmit={async (e) => { e.preventDefault(); const cents = parseMoney(adjustAmount); if (cents !== null && await run(() => api.addManualCashMovement({ occurredAt: day, amountCents: cents, direction, note: reason }), "Ajuste manual registrado.")) { setAdjustAmount(""); setReason(""); } }}><h2>Ajuste excepcional</h2><label>Tipo<select value={direction} onChange={(e) => setDirection(e.target.value as "INCOME" | "OUTFLOW")}><option value="INCOME">Ingreso manual</option><option value="OUTFLOW">Egreso manual</option></select></label><label>Importe<input value={adjustAmount} onChange={(e) => setAdjustAmount(e.target.value)} /></label><label>Motivo obligatorio<textarea value={reason} onChange={(e) => setReason(e.target.value)} /></label><button className="primary">Registrar ajuste</button></form><form className="panel form-panel" onSubmit={async (e) => { e.preventDefault(); const cents = parseMoney(counted); if (cents !== null) await run(() => api.closeCashSession(day, cents, closeNote || null), "Caja cerrada; la diferencia quedó registrada."); }}><h2>Cerrar caja</h2><p className="expected-callout">Debería haber <strong>{money(summary.expectedCashCents)}</strong></p><label>Efectivo contado<input value={counted} onChange={(e) => setCounted(e.target.value)} /></label><label>Nota opcional<textarea value={closeNote} onChange={(e) => setCloseNote(e.target.value)} /></label><button className="primary">Cerrar y guardar diferencia</button></form></div>}{summary.status === "CLOSED" && <section className="panel close-result"><h2>Caja cerrada</h2><Metric label="Efectivo contado" value={summary.countedCashCents ?? 0} /><Metric label="Diferencia" value={summary.differenceCents ?? 0} highlight /></section>}<section className="panel recent-section"><div className="panel-heading"><h2>Movimientos de efectivo de hoy</h2><span className="badge">{cashToday.length}</span></div>{cashToday.length === 0 ? <Empty text="No hay movimientos en efectivo." /> : cashToday.map((movement) => <article className="history-row" key={movement.id}><div><strong>{movement.description}</strong><small>{movement.sourceType === "MANUAL_ADJUSTMENT" ? movement.note : paymentLabel(movement.paymentMethod)}</small></div><b className={movement.direction === "OUTFLOW" ? "negative-text" : "positive-text"}>{movement.direction === "OUTFLOW" ? "−" : "+"}{money(movement.amountCents)}</b></article>)}</section></>}</div>;
 }
 
+function ReplenishmentView({ items }: { items: ReplenishmentItem[] }) {
+  const total = items.reduce((sum, item) => sum + item.estimatedCostCents, 0);
+  return <div className="page"><PageHeader eyebrow="Lista de compra" title="Reposición" detail="Productos en o debajo de su mínimo, priorizados por costo aproximado." /><div className="metric-cards"><article><span>Productos a reponer</span><strong>{items.length}</strong></article><article><span>Costo aproximado total</span><strong>{money(total)}</strong></article></div><section className="panel table-panel"><div className="table-wrap"><table><thead><tr><th>Producto</th><th>Actual</th><th>Mínimo</th><th>Objetivo</th><th>Sugerencia</th><th>Costo actual</th><th>Costo aprox.</th></tr></thead><tbody>{items.map((item) => <tr key={item.productId}><td><strong>{item.productName}</strong></td><td>{quantity(item.stockMillis, item.unitType)}</td><td>{quantity(item.reorderMinMillis, item.unitType)}</td><td>{quantity(item.reorderTargetMillis, item.unitType)}</td><td><strong>Comprar {quantity(item.suggestedQuantityMillis, item.unitType)}</strong></td><td>{money(item.currentCostCents)}</td><td>{money(item.estimatedCostCents)}</td></tr>)}</tbody></table></div>{items.length === 0 && <Empty text="No hay productos que necesiten reposición." />}</section></div>;
+}
+
+function PosView({ products, sales, complete }: { products: Product[]; sales: OperationSummary[]; complete: Complete }) {
+  const [query, setQuery] = useState(""); const [cart, setCart] = useState<CartLine[]>([]); const [payment, setPayment] = useState<PaymentMethod>("CASH"); const [saleDetail, setSaleDetail] = useState<SaleDetail | null>(null); const searchRef = useRef<HTMLInputElement>(null); const available = useMemo(() => products.filter((product) => product.active && `${product.name} ${product.barcode ?? ""}`.toLowerCase().includes(query.toLowerCase())).slice(0, 12), [products, query]); const total = cart.reduce((sum, line) => sum + amountFor(line.quantityMillis, line.product.salePriceCents), 0);
+  const add = (product: Product) => { if (product.stockMillis <= 0) return; const existing = cart.find((line) => line.product.id === product.id); if (existing) { if (existing.quantityMillis + 1000 <= product.stockMillis) setCart(cart.map((line) => line.product.id === product.id ? { ...line, quantityMillis: line.quantityMillis + 1000 } : line)); } else setCart([...cart, { product, quantityMillis: Math.min(1000, product.stockMillis) }]); setQuery(""); searchRef.current?.focus(); };
+  const scan = (event: KeyboardEvent<HTMLInputElement>) => { if (event.key === "Enter") { const exact = products.find((product) => product.barcode?.toLowerCase() === query.trim().toLowerCase()); if (exact) add(exact); else void complete(() => Promise.reject("No existe un producto con ese código de barras."), ""); } }; const confirm = async () => { const ok = await complete(() => api.confirmSale(today(), payment, cart.map((line) => ({ productId: line.product.id, quantityMillis: line.quantityMillis, unitCostCents: null }))), "Venta confirmada: stock y dinero actualizados."); if (ok) setCart([]); };
+  return <div className="page pos-page"><PageHeader eyebrow="Punto de venta" title="Nueva venta" detail="Buscá por nombre o escaneá un código." /><div className="pos-layout"><section><input ref={searchRef} autoFocus className="pos-search" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={scan} placeholder="⌕ Buscar producto o escanear código…" /><div className="product-grid">{available.map((product) => <button key={product.id} disabled={product.stockMillis <= 0} onClick={() => add(product)}><span className="product-category">{product.categoryName || "Producto"}</span><strong>{product.name}</strong><small>Stock: {quantity(product.stockMillis, product.unitType)}</small><b>{money(product.salePriceCents)}</b>{product.stockMillis <= 0 && <em>Sin stock</em>}</button>)}</div><div className="recent-sales"><h2>Ventas recientes</h2>{sales.slice(0, 5).map((sale) => <button key={sale.id} onClick={async () => setSaleDetail(await api.getSale(sale.id))}><span>Venta #{sale.id} · {sale.occurredAt} · {paymentLabel(sale.paymentMethod)}</span><strong>{money(sale.totalCents)}</strong></button>)}</div></section><aside className="cart-panel"><div className="panel-heading"><h2>Venta actual</h2><span className="badge">{cart.length} items</span></div>{cart.length === 0 ? <Empty text="El carrito está vacío." /> : <div className="cart-lines">{cart.map((line) => <article key={line.product.id}><div><strong>{line.product.name}</strong><small>{money(line.product.salePriceCents)} × {quantity(line.quantityMillis, line.product.unitType)}</small></div><QuantityInput product={line.product} value={line.quantityMillis} onChange={(value) => { if (value <= line.product.stockMillis) setCart(cart.map((item) => item.product.id === line.product.id ? { ...item, quantityMillis: value } : item)); }} /><b>{money(amountFor(line.quantityMillis, line.product.salePriceCents))}</b><button className="remove" onClick={() => setCart(cart.filter((item) => item.product.id !== line.product.id))}>×</button></article>)}</div>}<footer className="checkout"><label>Medio de pago<PaymentSelect value={payment} onChange={setPayment} /></label><div><span>Total</span><strong>{money(total)}</strong></div><button className="primary checkout-button" disabled={!cart.length} onClick={confirm}>Confirmar venta</button></footer></aside></div>
+    {saleDetail && <div className="modal-backdrop" onClick={() => setSaleDetail(null)}><section className="modal" onClick={(e) => e.stopPropagation()}><div className="panel-heading"><div><p className="eyebrow">Historial</p><h2>Venta #{saleDetail.id}</h2></div><button className="close" onClick={() => setSaleDetail(null)}>×</button></div><p>{saleDetail.occurredAt} · {paymentLabel(saleDetail.paymentMethod)}</p>{saleDetail.items.map((item) => <article className="snapshot" key={item.productId}><div><strong>{item.productName}</strong><small>{quantity(item.quantityMillis, products.find((p) => p.id === item.productId)?.unitType ?? "UNIT")} × {money(item.unitPriceCents)}</small></div><div><b>{money(item.subtotalCents)}</b><small>Costo histórico: {money(item.totalCostCents)}</small></div></article>)}<div className="snapshot-total"><span>Venta {money(saleDetail.totalCents)}</span><span>Costo vendido {money(saleDetail.totalCostCents)}</span><strong>Ganancia bruta {money(saleDetail.totalCents - saleDetail.totalCostCents)}</strong><span>Margen {saleDetail.totalCents ? (((saleDetail.totalCents - saleDetail.totalCostCents) / saleDetail.totalCents) * 100).toFixed(1).replace(".", ",") : "0"}%</span></div></section></div>}</div>;
+}
+
+function Empty({ text }: { text: string }) { return <div className="empty"><span>◎</span><p>{text}</p></div>; }
 export default App;
