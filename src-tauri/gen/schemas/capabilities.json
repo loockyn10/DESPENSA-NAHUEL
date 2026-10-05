@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Permisos base de la aplicación de escritorio.","local":true,"windows":["main"],"permissions":["core:default","opener:default"]}}

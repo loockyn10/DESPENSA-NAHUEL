@@ -1,0 +1,8 @@
+node_modules/
+.pnpm-store/
+dist/
+src-tauri/target/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
