@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Permisos base de la aplicación de escritorio.",
   "windows": ["main"],
-  "permissions": ["core:default", "opener:default"]
+  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save", "opener:default"]
 }

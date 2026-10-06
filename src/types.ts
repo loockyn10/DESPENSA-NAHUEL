@@ -47,6 +47,8 @@ export interface OperationSummary {
   totalCostCents: number | null;
   itemCount: number;
   paymentMethod: PaymentMethod | null;
+  voidedAt: string | null;
+  voidReason: string | null;
 }
 
 export interface InventoryMovement {
@@ -77,6 +79,9 @@ export interface SaleDetail {
   totalCents: number;
   totalCostCents: number;
   paymentMethod: PaymentMethod | null;
+  status: string;
+  voidedAt: string | null;
+  voidReason: string | null;
   items: SaleItemSnapshot[];
 }
 
@@ -84,6 +89,7 @@ export interface ExpenseCategory { id: number; name: string }
 export interface Expense {
   id: number; occurredAt: string; categoryId: number; categoryName: string;
   description: string; amountCents: number; paymentMethod: PaymentMethod; note: string | null;
+  status: string; voidedAt: string | null; voidReason: string | null;
 }
 export interface FinancialMovement {
   id: number; occurredAt: string; sourceType: string; sourceId: number | null;
@@ -111,3 +117,18 @@ export interface DashboardSummary {
   replenishmentCount: number; negativeInventoryDifferenceCents: number;
   positiveInventoryDifferenceCents: number; unknownPaymentCount: number;
 }
+
+export interface ImportProductRow {
+  rowNumber: number; name: string; barcode: string; category: string; unitType: string;
+  cost: string; salePrice: string; initialStock: string; minStock: string; targetStock: string;
+}
+export interface ImportRowPreview {
+  rowNumber: number; name: string; barcode: string | null; category: string | null; unitType: string;
+  costCents: number | null; salePriceCents: number | null; initialStockMillis: number | null;
+  minStockMillis: number | null; targetStockMillis: number | null; errors: string[];
+}
+export interface ImportPreview {
+  rows: ImportRowPreview[]; validCount: number; errorCount: number; newCategories: string[];
+}
+export interface ImportResult { productCount: number; categoryCount: number; stockMovementCount: number }
+export interface LocalDataInfo { databasePath: string; appVersion: string; schemaVersion: number }

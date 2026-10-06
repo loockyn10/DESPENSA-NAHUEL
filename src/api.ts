@@ -15,6 +15,10 @@ import type {
   InventoryCountSummary,
   ReplenishmentItem,
   DashboardSummary,
+  ImportProductRow,
+  ImportPreview,
+  ImportResult,
+  LocalDataInfo,
 } from "./types";
 
 export const api = {
@@ -34,15 +38,24 @@ export const api = {
   confirmPurchase: (occurredAt: string, paymentMethod: PaymentMethod, items: LineInput[]) =>
     invoke<OperationSummary>("confirm_purchase", { input: { occurredAt, paymentMethod, items } }),
   listPurchases: () => invoke<OperationSummary[]>("list_purchases"),
+  voidPurchase: (id: number, reason: string) => invoke<void>("void_purchase", { id, reason }),
   confirmSale: (occurredAt: string, paymentMethod: PaymentMethod, items: LineInput[]) =>
     invoke<OperationSummary>("confirm_sale", { input: { occurredAt, paymentMethod, items } }),
   listSales: () => invoke<OperationSummary[]>("list_sales"),
   getSale: (id: number) => invoke<SaleDetail>("get_sale", { id }),
+  voidSale: (id: number, reason: string) => invoke<void>("void_sale", { id, reason }),
   listExpenseCategories: () => invoke<ExpenseCategory[]>("list_expense_categories"),
   createExpenseCategory: (name: string) => invoke<ExpenseCategory>("create_expense_category", { name }),
   createExpense: (input: { occurredAt: string; categoryId: number; description: string; amountCents: number; paymentMethod: PaymentMethod; note: string | null }) =>
     invoke<Expense>("create_expense", { input }),
   listExpenses: () => invoke<Expense[]>("list_expenses"),
+  voidExpense: (id: number, reason: string) => invoke<void>("void_expense", { id, reason }),
+  previewProductImport: (rows: ImportProductRow[]) => invoke<ImportPreview>("preview_product_import", { rows }),
+  importProducts: (rows: ImportProductRow[]) => invoke<ImportResult>("import_products", { rows }),
+  writeImportTemplate: (path: string) => invoke<void>("write_import_template", { path }),
+  localDataInfo: () => invoke<LocalDataInfo>("local_data_info"),
+  createBackup: (path: string) => invoke<string>("create_backup", { path }),
+  restoreBackup: (path: string) => invoke<string>("restore_backup", { path }),
   listFinancialMovements: () => invoke<FinancialMovement[]>("list_financial_movements"),
   getCashSummary: (businessDate: string) => invoke<CashSummary>("get_cash_summary", { businessDate }),
   openCashSession: (businessDate: string, openingCashCents: number) => invoke<CashSummary>("open_cash_session", { businessDate, openingCashCents }),

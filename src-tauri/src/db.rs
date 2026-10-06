@@ -1,22 +1,28 @@
 use crate::models::*;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use std::collections::HashSet;
+use rusqlite::{
+    params, Connection, DatabaseName, OpenFlags, OptionalExtension, TransactionBehavior,
+};
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MIGRATION_001: &str = include_str!("../migrations/001_initial.sql");
 const MIGRATION_002: &str = include_str!("../migrations/002_business_control.sql");
+const MIGRATION_003: &str = include_str!("../migrations/003_operational_readiness.sql");
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 pub type DbResult<T> = Result<T, String>;
 
 fn db_error(error: rusqlite::Error) -> String {
     let message = error.to_string();
+    eprintln!("SQLite: {message}");
     if message.contains("products.barcode") {
         "Ese código de barras ya está asignado a otro producto.".to_string()
     } else if message.contains("categories.name") {
         "Ya existe una categoría con ese nombre.".to_string()
     } else {
-        format!("Error de base de datos: {message}")
+        "No se pudo completar la operación. Intentá nuevamente.".to_string()
     }
 }
 
@@ -56,6 +62,16 @@ pub fn migrate(connection: &Connection) -> DbResult<()> {
         .map_err(db_error)?;
     if !has_v2 {
         connection.execute_batch(MIGRATION_002).map_err(db_error)?;
+    }
+    let has_v3: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 3)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if !has_v3 {
+        connection.execute_batch(MIGRATION_003).map_err(db_error)?;
     }
     Ok(())
 }
@@ -460,6 +476,8 @@ pub fn confirm_purchase(
             item.quantity_millis,
             unit_cost,
             subtotal,
+            current_stock,
+            current_cost,
             new_cost,
         ));
     }
@@ -471,19 +489,23 @@ pub fn confirm_purchase(
         )
         .map_err(db_error)?;
     let purchase_id = transaction.last_insert_rowid();
-    for (product_id, quantity, unit_cost, subtotal, new_cost) in prepared {
-        transaction
-            .execute(
-                "INSERT INTO purchase_items(purchase_id, product_id, quantity_millis, unit_cost_cents, subtotal_cents)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![purchase_id, product_id, quantity, unit_cost, subtotal],
-            )
-            .map_err(db_error)?;
+    for (product_id, quantity, unit_cost, subtotal, previous_stock, previous_cost, new_cost) in
+        prepared
+    {
         transaction
             .execute(
                 "INSERT INTO inventory_movements(product_id, quantity_millis, movement_type, occurred_at, reference_type, reference_id)
                  VALUES (?1, ?2, 'PURCHASE', ?3, 'PURCHASE', ?4)",
                 params![product_id, quantity, occurred_at, purchase_id],
+            )
+            .map_err(db_error)?;
+        let inventory_movement_id = transaction.last_insert_rowid();
+        transaction
+            .execute(
+                "INSERT INTO purchase_items(purchase_id, product_id, quantity_millis, unit_cost_cents, subtotal_cents,
+                 previous_stock_millis, previous_cost_cents, resulting_cost_cents, inventory_movement_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![purchase_id, product_id, quantity, unit_cost, subtotal, previous_stock, previous_cost, new_cost, inventory_movement_id],
             )
             .map_err(db_error)?;
         transaction
@@ -509,13 +531,16 @@ pub fn confirm_purchase(
         total_cost_cents: None,
         item_count: input.items.len() as i64,
         payment_method: Some(input.payment_method),
+        voided_at: None,
+        void_reason: None,
     })
 }
 
 pub fn list_purchases(connection: &Connection) -> DbResult<Vec<OperationSummary>> {
     let mut statement = connection
         .prepare(
-            "SELECT p.id, p.occurred_at, p.status, p.total_cents, COUNT(i.id), p.payment_method
+            "SELECT p.id, p.occurred_at, p.status, p.total_cents, COUNT(i.id), p.payment_method,
+                    p.voided_at, p.void_reason
              FROM purchases p LEFT JOIN purchase_items i ON i.purchase_id = p.id
              GROUP BY p.id ORDER BY p.occurred_at DESC, p.id DESC LIMIT 50",
         )
@@ -530,6 +555,8 @@ pub fn list_purchases(connection: &Connection) -> DbResult<Vec<OperationSummary>
                 total_cost_cents: None,
                 item_count: row.get(4)?,
                 payment_method: row.get(5)?,
+                voided_at: row.get(6)?,
+                void_reason: row.get(7)?,
             })
         })
         .map_err(db_error)?
@@ -627,13 +654,16 @@ pub fn confirm_sale(
         total_cost_cents: Some(total_cost_cents),
         item_count: input.items.len() as i64,
         payment_method: Some(input.payment_method),
+        voided_at: None,
+        void_reason: None,
     })
 }
 
 pub fn list_sales(connection: &Connection) -> DbResult<Vec<OperationSummary>> {
     let mut statement = connection
         .prepare(
-            "SELECT s.id, s.occurred_at, s.status, s.total_cents, s.total_cost_cents, COUNT(i.id), s.payment_method
+            "SELECT s.id, s.occurred_at, s.status, s.total_cents, s.total_cost_cents, COUNT(i.id), s.payment_method,
+                    s.voided_at, s.void_reason
              FROM sales s LEFT JOIN sale_items i ON i.sale_id = s.id
              GROUP BY s.id ORDER BY s.occurred_at DESC, s.id DESC LIMIT 50",
         )
@@ -648,6 +678,8 @@ pub fn list_sales(connection: &Connection) -> DbResult<Vec<OperationSummary>> {
                 total_cost_cents: row.get(4)?,
                 item_count: row.get(5)?,
                 payment_method: row.get(6)?,
+                voided_at: row.get(7)?,
+                void_reason: row.get(8)?,
             })
         })
         .map_err(db_error)?
@@ -657,11 +689,11 @@ pub fn list_sales(connection: &Connection) -> DbResult<Vec<OperationSummary>> {
 }
 
 pub fn get_sale(connection: &Connection, id: i64) -> DbResult<SaleDetail> {
-    let (occurred_at, total_cents, total_cost_cents, payment_method): (String, i64, i64, Option<String>) = connection
+    let (occurred_at, total_cents, total_cost_cents, payment_method, status, voided_at, void_reason): (String, i64, i64, Option<String>, String, Option<String>, Option<String>) = connection
         .query_row(
-            "SELECT occurred_at, total_cents, total_cost_cents, payment_method FROM sales WHERE id = ?1 AND status = 'CONFIRMED'",
+            "SELECT occurred_at, total_cents, total_cost_cents, payment_method, status, voided_at, void_reason FROM sales WHERE id = ?1",
             [id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
         )
         .optional()
         .map_err(db_error)?
@@ -693,8 +725,233 @@ pub fn get_sale(connection: &Connection, id: i64) -> DbResult<SaleDetail> {
         total_cents,
         total_cost_cents,
         payment_method,
+        status,
+        voided_at,
+        void_reason,
         items,
     })
+}
+
+fn reverse_financial_movement(
+    transaction: &Connection,
+    source_type: &str,
+    source_id: i64,
+    description: &str,
+    reason: &str,
+) -> DbResult<()> {
+    let original: Option<(i64, i64, String, Option<String>)> = transaction
+        .query_row(
+            "SELECT id, amount_cents, direction, payment_method
+             FROM financial_movements WHERE source_type = ?1 AND source_id = ?2 AND reversal_of_movement_id IS NULL",
+            params![source_type, source_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(db_error)?;
+    let Some((movement_id, amount, direction, payment_method)) = original else {
+        return Err(
+            "No se encontró el movimiento financiero original; no se modificó nada.".to_string(),
+        );
+    };
+    let already_reversed: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM financial_movements WHERE reversal_of_movement_id = ?1)",
+            [movement_id],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if already_reversed {
+        return Err("La operación ya fue anulada.".to_string());
+    }
+    let opposite = if direction == "INCOME" {
+        "OUTFLOW"
+    } else {
+        "INCOME"
+    };
+    transaction
+        .execute(
+            "INSERT INTO financial_movements(occurred_at, source_type, amount_cents, direction,
+             payment_method, description, note, reversal_of_movement_id)
+             VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'MANUAL_ADJUSTMENT', ?1, ?2, ?3, ?4, ?5, ?6)",
+            params![amount, opposite, payment_method, description, reason, movement_id],
+        )
+        .map_err(db_error)?;
+    Ok(())
+}
+
+pub fn void_sale(connection: &mut Connection, id: i64, reason: &str) -> DbResult<()> {
+    let reason = required_text(reason, "El motivo")?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(db_error)?;
+    let status: String = transaction
+        .query_row("SELECT status FROM sales WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(db_error)?
+        .ok_or_else(|| "La venta no existe.".to_string())?;
+    if status != "CONFIRMED" {
+        return Err("La venta ya fue anulada.".to_string());
+    }
+    let mut statement = transaction
+        .prepare(
+            "SELECT id, product_id, quantity_millis FROM inventory_movements
+             WHERE reference_type = 'SALE' AND reference_id = ?1 AND reversal_of_movement_id IS NULL",
+        )
+        .map_err(db_error)?;
+    let movements = statement
+        .query_map([id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(db_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error)?;
+    drop(statement);
+    if movements.is_empty() {
+        return Err(
+            "No se encontraron los movimientos de stock originales; no se modificó nada."
+                .to_string(),
+        );
+    }
+    for (movement_id, product_id, quantity) in movements {
+        transaction
+            .execute(
+                "INSERT INTO inventory_movements(product_id, quantity_millis, movement_type, occurred_at,
+                 reference_type, reference_id, note, reversal_of_movement_id)
+                 VALUES (?1, ?2, 'SALE', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'SALE', ?3, ?4, ?5)",
+                params![product_id, -quantity, id, format!("Anulación de venta #{id}: {reason}"), movement_id],
+            )
+            .map_err(db_error)?;
+    }
+    reverse_financial_movement(
+        &transaction,
+        "SALE",
+        id,
+        &format!("Anulación de venta #{id}"),
+        &reason,
+    )?;
+    transaction
+        .execute(
+            "UPDATE sales SET status = 'CANCELLED', voided_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+             void_reason = ?1 WHERE id = ?2 AND status = 'CONFIRMED'",
+            params![reason, id],
+        )
+        .map_err(db_error)?;
+    transaction.commit().map_err(db_error)
+}
+
+pub fn void_purchase(connection: &mut Connection, id: i64, reason: &str) -> DbResult<()> {
+    let reason = required_text(reason, "El motivo")?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(db_error)?;
+    let status: String = transaction
+        .query_row("SELECT status FROM purchases WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(db_error)?
+        .ok_or_else(|| "La compra no existe.".to_string())?;
+    if status != "CONFIRMED" {
+        return Err("La compra ya fue anulada.".to_string());
+    }
+    let mut statement = transaction
+        .prepare(
+            "SELECT product_id, quantity_millis, previous_stock_millis, previous_cost_cents,
+                    resulting_cost_cents, inventory_movement_id
+             FROM purchase_items WHERE purchase_id = ?1 ORDER BY id",
+        )
+        .map_err(db_error)?;
+    let items = statement
+        .query_map([id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+            ))
+        })
+        .map_err(db_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error)?;
+    drop(statement);
+    if items.is_empty()
+        || items.iter().any(|item| {
+            item.2.is_none() || item.3.is_none() || item.4.is_none() || item.5.is_none()
+        })
+    {
+        return Err("Esta compra es anterior al sistema de reversión segura y no puede anularse automáticamente. Debe corregirse mediante una operación compensatoria.".to_string());
+    }
+    let mut prepared = Vec::new();
+    for (product_id, quantity, previous_stock, previous_cost, resulting_cost, movement_id) in items
+    {
+        let (previous_stock, previous_cost, resulting_cost, movement_id) = (
+            previous_stock.unwrap(),
+            previous_cost.unwrap(),
+            resulting_cost.unwrap(),
+            movement_id.unwrap(),
+        );
+        let later_movements: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM inventory_movements WHERE product_id = ?1 AND id > ?2)",
+                params![product_id, movement_id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        let current_stock = stock_for_product(&transaction, product_id)?;
+        let current_cost: i64 = transaction
+            .query_row(
+                "SELECT current_cost_cents FROM products WHERE id = ?1",
+                [product_id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if later_movements
+            || current_stock != previous_stock + quantity
+            || current_cost != resulting_cost
+        {
+            return Err("Esta compra ya tiene movimientos posteriores asociados y no puede anularse automáticamente. Debe corregirse mediante una operación compensatoria.".to_string());
+        }
+        prepared.push((product_id, quantity, previous_cost, movement_id));
+    }
+    for (product_id, quantity, previous_cost, movement_id) in prepared {
+        transaction
+            .execute(
+                "INSERT INTO inventory_movements(product_id, quantity_millis, movement_type, occurred_at,
+                 reference_type, reference_id, note, reversal_of_movement_id)
+                 VALUES (?1, ?2, 'PURCHASE', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'PURCHASE', ?3, ?4, ?5)",
+                params![product_id, -quantity, id, format!("Anulación de compra #{id}: {reason}"), movement_id],
+            )
+            .map_err(db_error)?;
+        transaction
+            .execute(
+                "UPDATE products SET current_cost_cents = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?2",
+                params![previous_cost, product_id],
+            )
+            .map_err(db_error)?;
+    }
+    reverse_financial_movement(
+        &transaction,
+        "PURCHASE",
+        id,
+        &format!("Anulación de compra #{id}"),
+        &reason,
+    )?;
+    transaction
+        .execute(
+            "UPDATE purchases SET status = 'CANCELLED', voided_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+             void_reason = ?1 WHERE id = ?2 AND status = 'CONFIRMED'",
+            params![reason, id],
+        )
+        .map_err(db_error)?;
+    transaction.commit().map_err(db_error)
 }
 
 pub fn list_expense_categories(connection: &Connection) -> DbResult<Vec<ExpenseCategory>> {
@@ -772,16 +1029,51 @@ pub fn create_expense(connection: &mut Connection, input: ExpenseInput) -> DbRes
         amount_cents: input.amount_cents,
         payment_method: input.payment_method,
         note,
+        status: "CONFIRMED".to_string(),
+        voided_at: None,
+        void_reason: None,
     })
+}
+
+pub fn void_expense(connection: &mut Connection, id: i64, reason: &str) -> DbResult<()> {
+    let reason = required_text(reason, "El motivo")?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(db_error)?;
+    let status: String = transaction
+        .query_row("SELECT status FROM expenses WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(db_error)?
+        .ok_or_else(|| "El gasto no existe.".to_string())?;
+    if status != "CONFIRMED" {
+        return Err("El gasto ya fue anulado.".to_string());
+    }
+    reverse_financial_movement(
+        &transaction,
+        "EXPENSE",
+        id,
+        &format!("Anulación de gasto #{id}"),
+        &reason,
+    )?;
+    transaction
+        .execute(
+            "UPDATE expenses SET status = 'CANCELLED', voided_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+             void_reason = ?1 WHERE id = ?2 AND status = 'CONFIRMED'",
+            params![reason, id],
+        )
+        .map_err(db_error)?;
+    transaction.commit().map_err(db_error)
 }
 
 pub fn list_expenses(connection: &Connection) -> DbResult<Vec<Expense>> {
     let mut statement = connection
         .prepare(
             "SELECT e.id, e.occurred_at, e.category_id, c.name, e.description,
-                    e.amount_cents, e.payment_method, e.note
+                    e.amount_cents, e.payment_method, e.note, e.status, e.voided_at, e.void_reason
              FROM expenses e JOIN expense_categories c ON c.id = e.category_id
-             WHERE e.status = 'CONFIRMED' ORDER BY e.occurred_at DESC, e.id DESC LIMIT 100",
+             ORDER BY e.occurred_at DESC, e.id DESC LIMIT 100",
         )
         .map_err(db_error)?;
     let rows = statement
@@ -795,6 +1087,9 @@ pub fn list_expenses(connection: &Connection) -> DbResult<Vec<Expense>> {
                 amount_cents: row.get(5)?,
                 payment_method: row.get(6)?,
                 note: row.get(7)?,
+                status: row.get(8)?,
+                voided_at: row.get(9)?,
+                void_reason: row.get(10)?,
             })
         })
         .map_err(db_error)?
@@ -1212,6 +1507,446 @@ pub fn dashboard_summary(
         negative_inventory_difference_cents: negative,
         positive_inventory_difference_cents: positive,
         unknown_payment_count: unknown,
+    })
+}
+
+fn digits_only(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn parse_import_money(value: &str, required: bool) -> Result<Option<i64>, String> {
+    let value = value.trim().replace(['$', ' '], "");
+    if value.is_empty() {
+        return if required {
+            Err("El importe es obligatorio.".to_string())
+        } else {
+            Ok(None)
+        };
+    }
+    if value.starts_with('-') {
+        return Err("El importe no puede ser negativo.".to_string());
+    }
+    let (pesos, cents) = if value.contains('.') && value.contains(',') {
+        if value.matches(',').count() != 1 {
+            return Err("El importe no tiene un formato válido.".to_string());
+        }
+        let (whole, decimal) = value.split_once(',').unwrap();
+        let groups: Vec<_> = whole.split('.').collect();
+        if groups.is_empty()
+            || !digits_only(groups[0])
+            || groups[0].len() > 3
+            || groups
+                .iter()
+                .skip(1)
+                .any(|group| group.len() != 3 || !digits_only(group))
+            || decimal.is_empty()
+            || decimal.len() > 2
+            || !digits_only(decimal)
+        {
+            return Err("El importe no tiene un formato válido.".to_string());
+        }
+        (groups.concat(), decimal.to_string())
+    } else if value.contains(',') {
+        if value.matches(',').count() != 1 {
+            return Err("El importe no tiene un formato válido.".to_string());
+        }
+        let (whole, decimal) = value.split_once(',').unwrap();
+        if !digits_only(whole) || decimal.is_empty() || decimal.len() > 2 || !digits_only(decimal) {
+            return Err("El importe no tiene un formato válido.".to_string());
+        }
+        (whole.to_string(), decimal.to_string())
+    } else if value.contains('.') {
+        return Err("El punto sin coma es ambiguo. Usá 1250 o 1250,50.".to_string());
+    } else if digits_only(&value) {
+        (value, String::new())
+    } else {
+        return Err("El importe no tiene un formato válido.".to_string());
+    };
+    let whole: i128 = pesos
+        .parse()
+        .map_err(|_| "El importe es demasiado grande.".to_string())?;
+    let fraction = match cents.len() {
+        0 => 0,
+        1 => cents.parse::<i128>().unwrap() * 10,
+        _ => cents.parse::<i128>().unwrap(),
+    };
+    let total = whole
+        .checked_mul(100)
+        .and_then(|amount| amount.checked_add(fraction))
+        .ok_or_else(|| "El importe es demasiado grande.".to_string())?;
+    Ok(Some(i64::try_from(total).map_err(|_| {
+        "El importe es demasiado grande.".to_string()
+    })?))
+}
+
+fn parse_import_quantity(value: &str) -> Result<Option<i64>, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.contains('.') || value.starts_with('-') || value.matches(',').count() > 1 {
+        return Err(
+            "La cantidad no tiene un formato válido; usá coma para los decimales.".to_string(),
+        );
+    }
+    let (whole, decimal) = value.split_once(',').unwrap_or((value, ""));
+    if !digits_only(whole) || decimal.len() > 3 || (!decimal.is_empty() && !digits_only(decimal)) {
+        return Err("La cantidad no tiene un formato válido.".to_string());
+    }
+    let units: i128 = whole
+        .parse()
+        .map_err(|_| "La cantidad es demasiado grande.".to_string())?;
+    let mut fraction = decimal.to_string();
+    while fraction.len() < 3 {
+        fraction.push('0');
+    }
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<i128>().unwrap()
+    };
+    let total = units
+        .checked_mul(1000)
+        .and_then(|amount| amount.checked_add(fraction))
+        .ok_or_else(|| "La cantidad es demasiado grande.".to_string())?;
+    Ok(Some(i64::try_from(total).map_err(|_| {
+        "La cantidad es demasiado grande.".to_string()
+    })?))
+}
+
+pub fn preview_product_import(
+    connection: &Connection,
+    rows: &[ImportProductRow],
+) -> DbResult<ImportPreview> {
+    if rows.is_empty() {
+        return Err("El archivo no contiene productos.".to_string());
+    }
+    let existing_barcodes: HashSet<String> = {
+        let mut statement = connection
+            .prepare("SELECT lower(barcode) FROM products WHERE barcode IS NOT NULL")
+            .map_err(db_error)?;
+        let values = statement
+            .query_map([], |row| row.get(0))
+            .map_err(db_error)?
+            .collect::<Result<HashSet<_>, _>>()
+            .map_err(db_error)?;
+        values
+    };
+    let existing_categories: HashSet<String> = {
+        let mut statement = connection
+            .prepare("SELECT lower(name) FROM categories")
+            .map_err(db_error)?;
+        let values = statement
+            .query_map([], |row| row.get(0))
+            .map_err(db_error)?
+            .collect::<Result<HashSet<_>, _>>()
+            .map_err(db_error)?;
+        values
+    };
+    let mut barcode_counts: HashMap<String, usize> = HashMap::new();
+    for row in rows {
+        let barcode = row.barcode.trim().to_lowercase();
+        if !barcode.is_empty() {
+            *barcode_counts.entry(barcode).or_default() += 1;
+        }
+    }
+    let mut previews = Vec::new();
+    let mut new_categories = HashMap::<String, String>::new();
+    for row in rows {
+        let name = row.name.trim().to_string();
+        let barcode = optional_text(Some(row.barcode.clone()));
+        let category = optional_text(Some(row.category.clone()));
+        let unit_type = row.unit_type.trim().to_uppercase();
+        let mut errors = Vec::new();
+        if name.is_empty() {
+            errors.push("Falta el nombre.".to_string());
+        }
+        if validate_unit_type(&unit_type).is_err() {
+            errors.push("unit_type debe ser UNIT o WEIGHT.".to_string());
+        }
+        if let Some(code) = &barcode {
+            let key = code.to_lowercase();
+            if existing_barcodes.contains(&key) {
+                errors.push("El código de barras ya existe.".to_string());
+            }
+            if barcode_counts.get(&key).copied().unwrap_or_default() > 1 {
+                errors.push("El código de barras está duplicado en el CSV.".to_string());
+            }
+        }
+        let cost = parse_import_money(&row.cost, false)
+            .map_err(|message| errors.push(format!("Costo: {message}")))
+            .ok()
+            .flatten();
+        let sale_price = parse_import_money(&row.sale_price, true)
+            .map_err(|message| errors.push(format!("Precio: {message}")))
+            .ok()
+            .flatten();
+        let initial_stock = parse_import_quantity(&row.initial_stock)
+            .map_err(|message| errors.push(format!("Stock inicial: {message}")))
+            .ok()
+            .flatten();
+        let minimum = parse_import_quantity(&row.min_stock)
+            .map_err(|message| errors.push(format!("Stock mínimo: {message}")))
+            .ok()
+            .flatten();
+        let target = parse_import_quantity(&row.target_stock)
+            .map_err(|message| errors.push(format!("Stock objetivo: {message}")))
+            .ok()
+            .flatten();
+        if unit_type == "UNIT"
+            && [initial_stock, minimum, target]
+                .into_iter()
+                .flatten()
+                .any(|value| value % 1000 != 0)
+        {
+            errors.push("Los productos UNIT no admiten cantidades fraccionarias.".to_string());
+        }
+        if minimum.zip(target).is_some_and(|(min, goal)| goal < min) {
+            errors.push("El stock objetivo debe ser mayor o igual al mínimo.".to_string());
+        }
+        if let Some(category_name) = &category {
+            let key = category_name.to_lowercase();
+            if !existing_categories.contains(&key) {
+                new_categories
+                    .entry(key)
+                    .or_insert_with(|| category_name.clone());
+            }
+        }
+        previews.push(ImportRowPreview {
+            row_number: row.row_number,
+            name,
+            barcode,
+            category,
+            unit_type,
+            cost_cents: cost,
+            sale_price_cents: sale_price,
+            initial_stock_millis: initial_stock,
+            min_stock_millis: minimum,
+            target_stock_millis: target,
+            errors,
+        });
+    }
+    let error_count = previews.iter().filter(|row| !row.errors.is_empty()).count() as i64;
+    let mut new_categories: Vec<_> = new_categories.into_values().collect();
+    new_categories.sort_by_key(|name| name.to_lowercase());
+    Ok(ImportPreview {
+        valid_count: previews.len() as i64 - error_count,
+        error_count,
+        rows: previews,
+        new_categories,
+    })
+}
+
+pub fn import_products(
+    connection: &mut Connection,
+    rows: Vec<ImportProductRow>,
+) -> DbResult<ImportResult> {
+    let preview = preview_product_import(connection, &rows)?;
+    if preview.error_count > 0 {
+        return Err(format!(
+            "El archivo contiene {} filas con errores. Corregilas antes de importar.",
+            preview.error_count
+        ));
+    }
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(db_error)?;
+    let mut categories = HashMap::<String, i64>::new();
+    {
+        let mut statement = transaction
+            .prepare("SELECT id, lower(name) FROM categories")
+            .map_err(db_error)?;
+        for result in statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_error)?
+        {
+            let (id, name) = result.map_err(db_error)?;
+            categories.insert(name, id);
+        }
+    }
+    let mut category_count = 0;
+    let mut stock_count = 0;
+    for row in preview.rows {
+        let category_id = if let Some(category) = row.category {
+            let key = category.to_lowercase();
+            if let Some(id) = categories.get(&key) {
+                Some(*id)
+            } else {
+                transaction
+                    .execute("INSERT INTO categories(name) VALUES (?1)", [&category])
+                    .map_err(db_error)?;
+                let id = transaction.last_insert_rowid();
+                categories.insert(key, id);
+                category_count += 1;
+                Some(id)
+            }
+        } else {
+            None
+        };
+        transaction
+            .execute(
+                "INSERT INTO products(name, barcode, category_id, unit_type, current_cost_cents, sale_price_cents,
+                 reorder_min_millis, reorder_target_millis) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![row.name, row.barcode, category_id, row.unit_type, row.cost_cents.unwrap_or(0),
+                    row.sale_price_cents.unwrap_or(0), row.min_stock_millis, row.target_stock_millis],
+            )
+            .map_err(db_error)?;
+        let product_id = transaction.last_insert_rowid();
+        if let Some(stock) = row.initial_stock_millis.filter(|stock| *stock > 0) {
+            transaction
+                .execute(
+                    "INSERT INTO inventory_movements(product_id, quantity_millis, movement_type, occurred_at, note)
+                     VALUES (?1, ?2, 'INITIAL_STOCK', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'Importación inicial CSV')",
+                    params![product_id, stock],
+                )
+                .map_err(db_error)?;
+            stock_count += 1;
+        }
+    }
+    let product_count = rows.len() as i64;
+    transaction.commit().map_err(db_error)?;
+    Ok(ImportResult {
+        product_count,
+        category_count,
+        stock_movement_count: stock_count,
+    })
+}
+
+pub fn write_import_template(path: &Path) -> DbResult<()> {
+    fs::write(
+        path,
+        "name,barcode,category,unit_type,cost,sale_price,initial_stock,min_stock,target_stock\r\n",
+    )
+    .map_err(|error| {
+        eprintln!("No se pudo escribir la plantilla: {error}");
+        "No se pudo guardar la plantilla en la ubicación elegida.".to_string()
+    })
+}
+
+fn validate_database_file(path: &Path) -> DbResult<i64> {
+    let connection =
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| {
+            eprintln!("Backup inválido: {error}");
+            "El archivo seleccionado no es una base de datos válida.".to_string()
+        })?;
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| {
+            eprintln!("Integrity check: {error}");
+            "No se pudo verificar la integridad del backup.".to_string()
+        })?;
+    if integrity != "ok" {
+        return Err("El backup está dañado y no se restauró.".to_string());
+    }
+    let version: i64 = connection
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .map_err(|error| {
+            eprintln!("Esquema incompatible: {error}");
+            "El archivo no es un backup compatible de Despensa Nahuel.".to_string()
+        })?;
+    if version != CURRENT_SCHEMA_VERSION {
+        return Err(format!(
+            "El backup usa una versión de datos incompatible (versión {version})."
+        ));
+    }
+    Ok(version)
+}
+
+pub fn create_backup(database_path: &Path, destination: &Path) -> DbResult<String> {
+    if database_path == destination {
+        return Err("Elegí una ubicación distinta de la base de datos activa.".to_string());
+    }
+    let temp = destination.with_extension("sqlite3.tmp");
+    if temp.exists() {
+        fs::remove_file(&temp)
+            .map_err(|_| "No se pudo preparar el archivo de backup.".to_string())?;
+    }
+    let source = open(database_path)?;
+    source
+        .backup(DatabaseName::Main, &temp, None)
+        .map_err(|error| {
+            eprintln!("Backup SQLite: {error}");
+            "No se pudo crear la copia de seguridad.".to_string()
+        })?;
+    validate_database_file(&temp)?;
+    if destination.exists() {
+        fs::remove_file(destination).map_err(|error| {
+            eprintln!("Reemplazo de backup: {error}");
+            "No se pudo reemplazar el archivo elegido.".to_string()
+        })?;
+    }
+    fs::rename(&temp, destination).map_err(|error| {
+        eprintln!("Finalización de backup: {error}");
+        "La copia se creó, pero no se pudo mover a la ubicación elegida.".to_string()
+    })?;
+    Ok(destination.to_string_lossy().into_owned())
+}
+
+pub fn restore_backup(database_path: &Path, source_path: &Path) -> DbResult<String> {
+    validate_database_file(source_path)?;
+    let backup_dir = database_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("backups");
+    fs::create_dir_all(&backup_dir).map_err(|error| {
+        eprintln!("Carpeta de backup preventivo: {error}");
+        "No se pudo crear la copia preventiva; la restauración no comenzó.".to_string()
+    })?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let preventive = backup_dir.join(format!("antes-de-restaurar-{stamp}.sqlite3"));
+    let current = open(database_path)?;
+    current
+        .backup(DatabaseName::Main, &preventive, None)
+        .map_err(|error| {
+            eprintln!("Backup preventivo: {error}");
+            "No se pudo crear la copia preventiva; la restauración no comenzó.".to_string()
+        })?;
+    drop(current);
+    let mut destination = open(database_path)?;
+    if let Err(error) = destination.restore(
+        DatabaseName::Main,
+        source_path,
+        None::<fn(rusqlite::backup::Progress)>,
+    ) {
+        eprintln!("Restauración SQLite: {error}");
+        let _ = destination.restore(
+            DatabaseName::Main,
+            &preventive,
+            None::<fn(rusqlite::backup::Progress)>,
+        );
+        return Err("No se pudo restaurar el backup. La base anterior fue preservada.".to_string());
+    }
+    drop(destination);
+    if let Err(error) = validate_database_file(database_path) {
+        let mut destination = open(database_path)?;
+        let _ = destination.restore(
+            DatabaseName::Main,
+            &preventive,
+            None::<fn(rusqlite::backup::Progress)>,
+        );
+        return Err(format!("{error} La base anterior fue recuperada."));
+    }
+    Ok(preventive.to_string_lossy().into_owned())
+}
+
+pub fn local_data_info(database_path: &Path, app_version: &str) -> DbResult<LocalDataInfo> {
+    let connection = open(database_path)?;
+    let schema_version: i64 = connection
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .map_err(db_error)?;
+    Ok(LocalDataInfo {
+        database_path: database_path.to_string_lossy().into_owned(),
+        app_version: app_version.to_string(),
+        schema_version,
     })
 }
 
@@ -1762,5 +2497,276 @@ mod tests {
         assert_eq!(sales, 1);
         assert_eq!(payment, None);
         assert_eq!(movements, 1);
+    }
+
+    #[test]
+    fn migration_from_sprint_two_preserves_existing_expenses() {
+        let connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        connection.execute_batch(MIGRATION_001).unwrap();
+        connection.execute_batch(MIGRATION_002).unwrap();
+        let category_id: i64 = connection
+            .query_row("SELECT id FROM expense_categories LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        connection.execute("INSERT INTO expenses(occurred_at, category_id, description, amount_cents, payment_method) VALUES ('2026-10-01', ?1, 'Existente', 1000, 'CASH')", [category_id]).unwrap();
+        migrate(&connection).unwrap();
+        let (count, version): (i64, i64) = (
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM expenses WHERE description = 'Existente'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
+                .unwrap(),
+        );
+        assert_eq!(count, 1);
+        assert_eq!(version, 3);
+    }
+
+    #[test]
+    fn void_sale_restores_stock_finance_dashboard_and_rejects_double_void() {
+        let mut connection = database();
+        let id = product(&connection, "Yerba", Some("7790001"));
+        connection.execute("UPDATE products SET current_cost_cents = 10000, sale_price_cents = 18000 WHERE id = ?1", [id]).unwrap();
+        add_initial_stock(
+            &mut connection,
+            StockInput {
+                product_id: id,
+                quantity_millis: 5_000,
+                occurred_at: "2026-10-05".into(),
+                note: None,
+            },
+        )
+        .unwrap();
+        let sale = confirm_sale(
+            &mut connection,
+            OperationInput {
+                occurred_at: "2026-10-05".into(),
+                payment_method: "CASH".into(),
+                items: vec![LineInput {
+                    product_id: id,
+                    quantity_millis: 2_000,
+                    unit_cost_cents: None,
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(stock_for_product(&connection, id).unwrap(), 3_000);
+        void_sale(&mut connection, sale.id, "Carga duplicada").unwrap();
+        assert_eq!(stock_for_product(&connection, id).unwrap(), 5_000);
+        let detail = get_sale(&connection, sale.id).unwrap();
+        assert_eq!(detail.status, "CANCELLED");
+        assert_eq!(detail.items.len(), 1);
+        assert_eq!(detail.void_reason.as_deref(), Some("Carga duplicada"));
+        let dashboard = dashboard_summary(&connection, "2026-10-01", "2026-11-01").unwrap();
+        assert_eq!(dashboard.sales_cents, 0);
+        assert_eq!(dashboard.cost_of_goods_cents, 0);
+        assert_eq!(dashboard.cash_in_cents - dashboard.cash_out_cents, 0);
+        assert!(void_sale(&mut connection, sale.id, "Otra vez").is_err());
+        assert_eq!(stock_for_product(&connection, id).unwrap(), 5_000);
+    }
+
+    #[test]
+    fn void_expense_reverses_result_and_cash_flow() {
+        let mut connection = database();
+        let category_id = list_expense_categories(&connection).unwrap()[0].id;
+        let expense = create_expense(
+            &mut connection,
+            ExpenseInput {
+                occurred_at: "2026-10-05".into(),
+                category_id,
+                description: "Luz".into(),
+                amount_cents: 25_000,
+                payment_method: "CASH".into(),
+                note: None,
+            },
+        )
+        .unwrap();
+        void_expense(&mut connection, expense.id, "Factura incorrecta").unwrap();
+        let dashboard = dashboard_summary(&connection, "2026-10-01", "2026-11-01").unwrap();
+        assert_eq!(dashboard.expenses_cents, 0);
+        assert_eq!(dashboard.cash_in_cents - dashboard.cash_out_cents, 0);
+        let history = list_expenses(&connection).unwrap();
+        assert_eq!(history[0].status, "CANCELLED");
+        assert_eq!(
+            history[0].void_reason.as_deref(),
+            Some("Factura incorrecta")
+        );
+    }
+
+    #[test]
+    fn safe_purchase_void_restores_stock_cost_and_flow() {
+        let mut connection = database();
+        let id = product(&connection, "Arroz", None);
+        connection
+            .execute(
+                "UPDATE products SET current_cost_cents = 10000 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        add_initial_stock(
+            &mut connection,
+            StockInput {
+                product_id: id,
+                quantity_millis: 3_000,
+                occurred_at: "2026-10-05".into(),
+                note: None,
+            },
+        )
+        .unwrap();
+        let purchase = confirm_purchase(
+            &mut connection,
+            OperationInput {
+                occurred_at: "2026-10-05".into(),
+                payment_method: "TRANSFER".into(),
+                items: vec![LineInput {
+                    product_id: id,
+                    quantity_millis: 2_000,
+                    unit_cost_cents: Some(16000),
+                }],
+            },
+        )
+        .unwrap();
+        void_purchase(&mut connection, purchase.id, "Proveedor canceló").unwrap();
+        assert_eq!(stock_for_product(&connection, id).unwrap(), 3_000);
+        let cost: i64 = connection
+            .query_row(
+                "SELECT current_cost_cents FROM products WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cost, 10_000);
+        let dashboard = dashboard_summary(&connection, "2026-10-01", "2026-11-01").unwrap();
+        assert_eq!(dashboard.purchases_cents, 0);
+        assert_eq!(dashboard.cash_in_cents - dashboard.cash_out_cents, 0);
+    }
+
+    #[test]
+    fn purchase_with_later_inventory_movement_cannot_be_voided() {
+        let mut connection = database();
+        let id = product(&connection, "Fideos", None);
+        let purchase = confirm_purchase(
+            &mut connection,
+            OperationInput {
+                occurred_at: "2026-10-05".into(),
+                payment_method: "CASH".into(),
+                items: vec![LineInput {
+                    product_id: id,
+                    quantity_millis: 4_000,
+                    unit_cost_cents: Some(12000),
+                }],
+            },
+        )
+        .unwrap();
+        adjust_stock(
+            &mut connection,
+            StockInput {
+                product_id: id,
+                quantity_millis: 3_000,
+                occurred_at: "2026-10-06".into(),
+                note: Some("Conteo".into()),
+            },
+        )
+        .unwrap();
+        let before = stock_for_product(&connection, id).unwrap();
+        assert!(void_purchase(&mut connection, purchase.id, "Error").is_err());
+        assert_eq!(stock_for_product(&connection, id).unwrap(), before);
+        let status: String = connection
+            .query_row(
+                "SELECT status FROM purchases WHERE id = ?1",
+                [purchase.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "CONFIRMED");
+    }
+
+    fn import_row(row_number: i64, name: &str, barcode: &str) -> ImportProductRow {
+        ImportProductRow {
+            row_number,
+            name: name.into(),
+            barcode: barcode.into(),
+            category: "Almacén".into(),
+            unit_type: "UNIT".into(),
+            cost: "1.250,50".into(),
+            sale_price: "1800".into(),
+            initial_stock: "10".into(),
+            min_stock: "2".into(),
+            target_stock: "8".into(),
+        }
+    }
+
+    #[test]
+    fn csv_import_is_validated_and_atomic() {
+        let mut connection = database();
+        let result =
+            import_products(&mut connection, vec![import_row(2, "Azúcar", "779100")]).unwrap();
+        assert_eq!(result.product_count, 1);
+        assert_eq!(result.category_count, 1);
+        let product = list_products(&connection).unwrap().remove(0);
+        assert_eq!(product.current_cost_cents, 125_050);
+        assert_eq!(product.stock_millis, 10_000);
+
+        let mut invalid = import_row(3, "Aceite", "779101");
+        invalid.sale_price = "1.250".into();
+        assert!(import_products(&mut connection, vec![invalid]).is_err());
+        assert_eq!(list_products(&connection).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn csv_duplicate_barcode_is_reported_before_import() {
+        let connection = database();
+        let preview = preview_product_import(
+            &connection,
+            &[import_row(2, "A", "123"), import_row(3, "B", "123")],
+        )
+        .unwrap();
+        assert_eq!(preview.error_count, 2);
+        assert!(preview
+            .rows
+            .iter()
+            .all(|row| row.errors.iter().any(|error| error.contains("duplicado"))));
+    }
+
+    #[test]
+    fn backup_restore_recovers_previous_state_and_rejects_invalid_file() {
+        let base = std::env::temp_dir().join(format!(
+            "despensa-backup-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let database_path = base.join("live.sqlite3");
+        let backup_path = base.join("backup.sqlite3");
+        let invalid_path = base.join("invalid.sqlite3");
+        {
+            let connection = open(&database_path).unwrap();
+            migrate(&connection).unwrap();
+            product(&connection, "Antes", None);
+            create_backup(&database_path, &backup_path).unwrap();
+            product(&connection, "Después", None);
+            drop(connection);
+        }
+        restore_backup(&database_path, &backup_path).unwrap();
+        let connection = open(&database_path).unwrap();
+        assert_eq!(list_products(&connection).unwrap().len(), 1);
+        drop(connection);
+        fs::write(&invalid_path, b"no es sqlite").unwrap();
+        assert!(restore_backup(&database_path, &invalid_path).is_err());
+        let connection = open(&database_path).unwrap();
+        assert_eq!(list_products(&connection).unwrap().len(), 1);
+        drop(connection);
+        fs::remove_dir_all(&base).unwrap();
     }
 }

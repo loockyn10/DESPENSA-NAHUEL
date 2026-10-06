@@ -80,6 +80,11 @@ fn list_purchases(state: State<'_, AppState>) -> Result<Vec<OperationSummary>, S
 }
 
 #[tauri::command]
+fn void_purchase(state: State<'_, AppState>, id: i64, reason: String) -> Result<(), String> {
+    db::void_purchase(&mut connection(&state)?, id, &reason)
+}
+
+#[tauri::command]
 fn confirm_sale(
     state: State<'_, AppState>,
     input: OperationInput,
@@ -95,6 +100,11 @@ fn list_sales(state: State<'_, AppState>) -> Result<Vec<OperationSummary>, Strin
 #[tauri::command]
 fn get_sale(state: State<'_, AppState>, id: i64) -> Result<SaleDetail, String> {
     db::get_sale(&connection(&state)?, id)
+}
+
+#[tauri::command]
+fn void_sale(state: State<'_, AppState>, id: i64, reason: String) -> Result<(), String> {
+    db::void_sale(&mut connection(&state)?, id, &reason)
 }
 
 #[tauri::command]
@@ -118,6 +128,47 @@ fn create_expense(state: State<'_, AppState>, input: ExpenseInput) -> Result<Exp
 #[tauri::command]
 fn list_expenses(state: State<'_, AppState>) -> Result<Vec<Expense>, String> {
     db::list_expenses(&connection(&state)?)
+}
+
+#[tauri::command]
+fn void_expense(state: State<'_, AppState>, id: i64, reason: String) -> Result<(), String> {
+    db::void_expense(&mut connection(&state)?, id, &reason)
+}
+
+#[tauri::command]
+fn preview_product_import(
+    state: State<'_, AppState>,
+    rows: Vec<ImportProductRow>,
+) -> Result<ImportPreview, String> {
+    db::preview_product_import(&connection(&state)?, &rows)
+}
+
+#[tauri::command]
+fn import_products(
+    state: State<'_, AppState>,
+    rows: Vec<ImportProductRow>,
+) -> Result<ImportResult, String> {
+    db::import_products(&mut connection(&state)?, rows)
+}
+
+#[tauri::command]
+fn write_import_template(path: String) -> Result<(), String> {
+    db::write_import_template(&PathBuf::from(path))
+}
+
+#[tauri::command]
+fn local_data_info(state: State<'_, AppState>) -> Result<LocalDataInfo, String> {
+    db::local_data_info(&state.database_path, env!("CARGO_PKG_VERSION"))
+}
+
+#[tauri::command]
+fn create_backup(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    db::create_backup(&state.database_path, &PathBuf::from(path))
+}
+
+#[tauri::command]
+fn restore_backup(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    db::restore_backup(&state.database_path, &PathBuf::from(path))
 }
 
 #[tauri::command]
@@ -196,6 +247,7 @@ fn dashboard_summary(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_data = app
                 .path()
@@ -221,13 +273,22 @@ pub fn run() {
             list_movements,
             confirm_purchase,
             list_purchases,
+            void_purchase,
             confirm_sale,
             list_sales,
             get_sale,
+            void_sale,
             list_expense_categories,
             create_expense_category,
             create_expense,
             list_expenses,
+            void_expense,
+            preview_product_import,
+            import_products,
+            write_import_template,
+            local_data_info,
+            create_backup,
+            restore_backup,
             list_financial_movements,
             get_cash_summary,
             open_cash_session,

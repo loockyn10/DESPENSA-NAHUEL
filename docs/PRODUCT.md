@@ -22,3 +22,9 @@ El inventario será auditable por movimientos (compra, venta, ajuste, vencimient
 El circuito disponible es: categoría/producto → stock inicial o compra → costo promedio → venta → descuento de stock → control físico → reposición. El POS permite búsqueda por nombre o código, cantidades por unidad o peso, medio de pago y confirmación atómica. Productos inactivos permanecen en el historial.
 
 Inicio explica el mes actual (o un rango explícito) con ventas, costo histórico vendido, ganancia bruta, gastos y **resultado estimado**. Compras de mercadería y flujo de dinero se muestran por separado para no confundir caja con rentabilidad. Gastos, caja diaria, ajustes manuales justificados, inventarios físicos parciales y lista de reposición están disponibles con lenguaje operativo.
+
+## Preparación operativa
+
+Las ventas y gastos confirmados pueden anularse con motivo obligatorio. La operación original permanece visible como **ANULADA** y el sistema agrega movimientos compensatorios de inventario/dinero. Las compras nuevas guardan evidencia de stock y costo: sólo pueden anularse automáticamente si no hubo movimientos posteriores y ambos valores pueden restaurarse exactamente; las compras históricas no se declaran reversibles.
+
+La carga inicial admite CSV con vista previa y validación completa antes de una importación atómica. El POS tiene un campo dedicado al lector USB tipo teclado (`código + Enter`); los productos por peso siempre piden cantidad. Configuración muestra la ruta local y permite crear/restaurar backups SQLite consistentes con copia preventiva.

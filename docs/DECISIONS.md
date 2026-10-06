@@ -83,3 +83,33 @@
 **Decisión:** cada control parcial conserva stock esperado, contado, diferencia, costo snapshot y enlaza el `ADJUSTMENT` generado.
 **Motivo:** el ledger sigue siendo la fuente de stock y la diferencia debe poder explicarse.
 **Consecuencias:** su valor se muestra separado de gastos operativos.
+
+## D015 — Anulación por compensación
+
+**Decisión:** una operación confirmada nunca se borra; conserva fecha, motivo, items y movimientos originales, y agrega compensaciones enlazadas. `CANCELLED` es el valor persistido compatible y la UI lo presenta como **ANULADA**.
+**Motivo:** poder explicar cada corrección sin reescribir historia.
+**Consecuencias:** reportes económicos excluyen operaciones anuladas y el ledger financiero netea original más compensación.
+
+## D016 — Reversión conservadora de compras
+
+**Decisión:** sólo compras creadas desde migration 003 guardan stock/costo previos, costo resultante y movimiento aplicado. Se revierten únicamente sin movimientos posteriores y con stock/costo exactos.
+**Motivo:** restar cantidad y costo no deshace correctamente un promedio ponderado.
+**Consecuencias:** compras históricas o incompatibles requieren una operación compensatoria manual.
+
+## D017 — CSV propio y creación solamente
+
+**Decisión:** formato `name,barcode,category,unit_type,cost,sale_price,initial_stock,min_stock,target_stock`, con importes argentinos explícitos, cantidades en milésimas, preview y commit atómico.
+**Motivo:** migrar volumen sin asumir el formato desconocido del sistema anterior.
+**Consecuencias:** no se sobrescriben productos; barcode existente o repetido bloquea la importación completa. El stock genera `INITIAL_STOCK` y el costo inicial se guarda sin inventar una compra.
+
+## D018 — Backup SQLite consistente
+
+**Decisión:** usar SQLite Online Backup API y no copiar el archivo activo; validar integridad/esquema antes de restaurar y crear una copia preventiva.
+**Motivo:** WAL puede contener cambios todavía no consolidados y una restauración fallida no debe destruir la base vigente.
+**Consecuencias:** backups son locales y portables; la versión de esquema debe coincidir.
+
+## D019 — Scanner como teclado
+
+**Decisión:** mantener un input POS dedicado que procesa barcode con Enter y recupera foco; no detectar velocidad ni usar SDK propietario.
+**Motivo:** lectores USB comunes se comportan como keyboard wedge.
+**Consecuencias:** no interfiere con formularios; `WEIGHT` siempre solicita cantidad manual.

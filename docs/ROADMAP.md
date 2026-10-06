@@ -12,5 +12,7 @@
 - Reposición. ✅
 - Gastos, caja y resultados. ✅
 - Inventario físico parcial. ✅
+- Preparación para uso real: anulaciones auditables, importación CSV, scanner robusto y backup/restore local. ✅
+- Release Windows verificable y recorrido manual con hardware/datos reales.
 
 Las prioridades posteriores se definirán con la información de discovery y el uso real.

@@ -18,25 +18,31 @@
 - Inventario físico parcial con snapshots y ajustes de ledger.
 - Stock mínimo/objetivo y lista de reposición para `UNIT` y `WEIGHT`.
 - Documentación canónica y guía de agentes.
+- Anulación auditable de ventas y gastos mediante movimientos compensatorios.
+- Anulación conservadora de compras nuevas sólo cuando stock/costo pueden restaurarse con prueba suficiente.
+- Importación inicial CSV con plantilla, preview, errores por fila, duplicados y transacción única.
+- Flujo de scanner keyboard-wedge dedicado en POS, incluido pedido manual de peso.
+- Backup/restauración local con validación, copia preventiva y datos de instalación visibles.
+- Protección central contra doble ejecución de acciones asíncronas sensibles.
 
 ## Verificado
 
 - ESLint sin errores.
 - `tsc -b` sin errores.
 - Build de producción Vite generado correctamente.
-- Tests Rust: promedio, compra, venta/snapshot, atomicidad, barcode, resultado económico, caja, inventario físico, reposición, migración y persistencia end-to-end.
+- Tests Rust: 19 casos sobre promedio, operaciones, anulaciones, compra reversible/no reversible, CSV, backup/restore inválido, migración y persistencia.
 - La aplicación de desarrollo compiló, abrió y creó la base en App Data.
 - Build release y paquetes Windows MSI/NSIS generados correctamente.
 
 ## Pendiente
 
 - Discovery con Lili.
-- Periféricos y anulaciones/reversiones auditables.
-- Flujos de anulación/reversión para operaciones confirmadas.
+- Discovery del formato exportable del programa actual de Lili.
+- Datos reales de impresora/tickets y prueba física del lector.
 
 ## Requiere verificación
 
-- Recorrido visual manual completo del escenario operativo; la autorización de control de Windows venció durante esta ejecución.
+- Recorrido visual manual completo con datos reales, lector físico e instalador Windows.
 
 ## Estado remoto
 

@@ -211,6 +211,31 @@ td small { color: #8a958e; font-size: 10px; margin-top: 3px; }
 .close-result { margin-bottom: 22px; max-width: 620px; }
 .negative-text { color: #a04432 !important; }
 .positive-text { color: #247044 !important; }
+.danger { background: #9d3c2f; border-color: #9d3c2f; color: white; }
+.danger:hover { background: #832f25; }
+.danger-link { background: transparent; border: 0; color: #9d3c2f; display: block; font-size: 10px; margin-left: auto; padding: 4px 0; }
+.void-badge { background: #f4d9d3; border-radius: 999px; color: #8b3328; display: inline-block; font-family: Arial, sans-serif; font-size: 9px; margin-left: 5px; padding: 3px 7px; vertical-align: middle; }
+.voided-row { background: #faf3f1 !important; color: #806b67 !important; opacity: .88; }
+.void-reason { background: #faf0ed; border-left: 3px solid #b55242; color: #7e392f !important; padding: 10px; }
+.modal-top { z-index: 45; }
+.dialog-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+.scanner-strip { align-items: end; background: #e9f4e9; border: 1px solid #bbd7c0; border-radius: 13px; display: grid; gap: 18px; grid-template-columns: minmax(280px, 520px) 1fr; margin-bottom: 16px; padding: 13px 16px; }
+.scanner-strip label { color: #24523a; font-weight: 850; }
+.scanner-strip input { background: white; border-color: #6b9f7c; font-size: 17px; margin-top: 5px; }
+.scanner-strip span { color: #4d745d; font-size: 11px; padding-bottom: 11px; }
+.import-drop { border-style: dashed; }
+.import-drop input[type="file"] { background: #f6f8f5; margin-top: 8px; }
+.error-text { color: #9d3c2f; }
+.error-row { background: #fff0ed; }
+.error-row td:last-child { color: #91382d; font-size: 10px; max-width: 360px; }
+.settings-panel { max-width: 760px; }
+.settings-panel dl { margin: 20px 0; }
+.settings-panel dl div { border-top: 1px solid #edf0eb; display: grid; gap: 20px; grid-template-columns: 180px 1fr; padding: 13px 0; }
+.settings-panel dt { color: #758179; font-size: 11px; font-weight: 800; }
+.settings-panel dd { color: #2d4435; margin: 0; }
+.path-value { font-family: Consolas, monospace; font-size: 11px; overflow-wrap: anywhere; }
+.settings-actions { display: flex; gap: 10px; margin: 22px 0; }
+.success-note { background: #e8f3e8; border-radius: 9px; color: #286344; overflow-wrap: anywhere; padding: 11px; }
 
 @media (max-width: 1120px) {
   .purchase-layout { grid-template-columns: 1fr; }

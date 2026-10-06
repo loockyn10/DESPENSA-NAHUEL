@@ -87,6 +87,8 @@ pub struct OperationSummary {
     pub total_cost_cents: Option<i64>,
     pub item_count: i64,
     pub payment_method: Option<String>,
+    pub voided_at: Option<String>,
+    pub void_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,6 +111,9 @@ pub struct SaleDetail {
     pub total_cents: i64,
     pub total_cost_cents: i64,
     pub payment_method: Option<String>,
+    pub status: String,
+    pub voided_at: Option<String>,
+    pub void_reason: Option<String>,
     pub items: Vec<SaleItemSnapshot>,
 }
 
@@ -141,6 +146,65 @@ pub struct Expense {
     pub amount_cents: i64,
     pub payment_method: String,
     pub note: Option<String>,
+    pub status: String,
+    pub voided_at: Option<String>,
+    pub void_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportProductRow {
+    pub row_number: i64,
+    pub name: String,
+    pub barcode: String,
+    pub category: String,
+    pub unit_type: String,
+    pub cost: String,
+    pub sale_price: String,
+    pub initial_stock: String,
+    pub min_stock: String,
+    pub target_stock: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportRowPreview {
+    pub row_number: i64,
+    pub name: String,
+    pub barcode: Option<String>,
+    pub category: Option<String>,
+    pub unit_type: String,
+    pub cost_cents: Option<i64>,
+    pub sale_price_cents: Option<i64>,
+    pub initial_stock_millis: Option<i64>,
+    pub min_stock_millis: Option<i64>,
+    pub target_stock_millis: Option<i64>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreview {
+    pub rows: Vec<ImportRowPreview>,
+    pub valid_count: i64,
+    pub error_count: i64,
+    pub new_categories: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResult {
+    pub product_count: i64,
+    pub category_count: i64,
+    pub stock_movement_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalDataInfo {
+    pub database_path: String,
+    pub app_version: String,
+    pub schema_version: i64,
 }
 
 #[derive(Debug, Serialize)]
